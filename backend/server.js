@@ -39,6 +39,8 @@ app.use(passport.session());
 
 app.use("/auth", authRoutes);
 app.use("/meetings", meetingRoutes);
+app.use("/api/meeting", meetingRoutes);
+app.use("/api/meetings", meetingRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend running");
