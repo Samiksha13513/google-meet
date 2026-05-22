@@ -3,7 +3,7 @@ const passport = require("passport");
 const jwt = require("jsonwebtoken");
 
 const router = express.Router();
-const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+const frontendUrl = process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app/";
 
 router.get(
   "/google",
