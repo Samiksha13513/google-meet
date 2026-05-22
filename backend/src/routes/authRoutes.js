@@ -30,9 +30,7 @@ router.get(
       }
     );
 
-    res.redirect(
-      `http://localhost:3000/dashboard?token=${token}`
-    );
+    res.redirect(`${frontendUrl}/auth/callback?token=${token}`);
   }
 );
 module.exports = router;
