@@ -30,16 +30,47 @@ router.post(
         });
       }
 
-      const meetingCode =
-        generateMeetingCode();
+      // Retry logic for unique constraint violation (P2002)
+      let meeting;
+      let retries = 0;
+      const maxRetries = 5;
 
-      const meeting =
-        await prisma.meeting.create({
-          data: {
-            meetingCode,
-            hostId: req.user.id,
-          },
-        });
+      while (retries < maxRetries) {
+        try {
+          const meetingCode = generateMeetingCode();
+          // Set expiration to 24 hours from now
+          const expiresAt = new Date();
+          expiresAt.setHours(expiresAt.getHours() + 24);
+
+          meeting = await prisma.meeting.create({
+            data: {
+              meetingCode,
+              hostId: req.user.id,
+              expiresAt,
+            },
+          });
+
+          break; // Success, exit retry loop
+        } catch (error) {
+          // Check if it's a unique constraint violation (P2002)
+          if (error.code === "P2002") {
+            retries++;
+            console.log(
+              `Meeting code collision detected. Retry ${retries}/${maxRetries}`
+            );
+
+            if (retries >= maxRetries) {
+              throw new Error(
+                "Failed to generate unique meeting code after multiple attempts"
+              );
+            }
+            // Continue to next iteration to retry with new code
+          } else {
+            // Not a constraint violation, rethrow
+            throw error;
+          }
+        }
+      }
 
       return res.status(201).json({
         success: true,
@@ -85,6 +116,16 @@ router.get(
         return res.status(404).json({
           success: false,
           message: "Meeting not found",
+        });
+      }
+
+      // Check if meeting has expired
+      const now = new Date();
+      if (meeting.expiresAt < now) {
+        return res.status(410).json({
+          success: false,
+          message: "Meeting has expired",
+          expiresAt: meeting.expiresAt,
         });
       }
 

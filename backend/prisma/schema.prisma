@@ -23,6 +23,7 @@ model Meeting {
   meetingCode  String   @unique
   hostId       String
   createdAt    DateTime @default(now())
+  expiresAt    DateTime
 
   host User @relation(fields: [hostId], references: [id])
 }
