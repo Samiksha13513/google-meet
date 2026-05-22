@@ -23,11 +23,20 @@ const app = express();
 
 const frontendUrl =
   process.env.FRONTEND_URL ||
-  "http://localhost:3000";
+  "https://google-meet-frontend-theta.vercel.app";
+const allowedOrigins = new Set(
+  [frontendUrl, "http://localhost:3000"].map((url) => url.replace(/\/$/, ""))
+);
 
 app.use(
   cors({
-    origin: frontendUrl,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.has(origin.replace(/\/$/, ""))) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
