@@ -3,7 +3,7 @@ const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
 const prisma = require("./prisma");
 
-const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+const backendUrl = (process.env.BACKEND_URL || "http://localhost:5000").replace(/\/$/, "");
 
 passport.use(
   new GoogleStrategy(
