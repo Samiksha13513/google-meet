@@ -3,7 +3,7 @@ const passport = require("passport");
 const jwt = require("jsonwebtoken");
 
 const router = express.Router();
-const frontendUrl = process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app/";
+const frontendUrl = (process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app").replace(/\/$/, "");
 
 router.get(
   "/google",
@@ -19,18 +19,27 @@ router.get(
     failureRedirect: "/login",
   }),
   (req, res) => {
-    const token = jwt.sign(
-      {
-        id: req.user.id,
-        email: req.user.email,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "7d",
+    try {
+      if (!req.user) {
+        return res.status(401).json({ error: "User not authenticated" });
       }
-    );
 
-    res.redirect(`${frontendUrl}/auth/callback?token=${token}`);
+      const token = jwt.sign(
+        {
+          id: req.user.id,
+          email: req.user.email,
+        },
+        process.env.JWT_SECRET,
+        {
+          expiresIn: "7d",
+        }
+      );
+
+      res.redirect(`${frontendUrl}/auth/callback?token=${token}`);
+    } catch (error) {
+      console.error("Auth callback error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
   }
 );
 module.exports = router;
