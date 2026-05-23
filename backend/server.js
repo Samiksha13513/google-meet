@@ -5,6 +5,7 @@ const passport = require("passport");
 const path = require("path");
 const dns = require("dns");
 const http = require("http");
+const { execSync } = require("child_process");
 
 const setupSocket = require("../backend/src/socket/socket");
 
@@ -13,6 +14,19 @@ require("dotenv").config({
 });
 
 dns.setDefaultResultOrder("ipv4first");
+
+// Run migrations before starting server
+console.log("Running database migrations...");
+try {
+  execSync("npx prisma migrate deploy", { 
+    stdio: "inherit",
+    env: { ...process.env }
+  });
+  console.log("✓ Migrations completed");
+} catch (error) {
+  console.error("✗ Migration failed:", error.message);
+  process.exit(1);
+}
 
 require("./src/config/passport");
 
