@@ -20,7 +20,10 @@ router.get(
   }),
   (req, res) => {
     try {
+      console.log("Callback received, user:", req.user);
+      
       if (!req.user) {
+        console.error("User not found after authentication");
         return res.status(401).json({ error: "User not authenticated" });
       }
 
@@ -35,10 +38,11 @@ router.get(
         }
       );
 
+      console.log("Token generated successfully, redirecting to:", `${frontendUrl}/auth/callback`);
       res.redirect(`${frontendUrl}/auth/callback?token=${token}`);
     } catch (error) {
-      console.error("Auth callback error:", error);
-      res.status(500).json({ error: "Internal server error" });
+      console.error("Auth callback error:", error.message, error.stack);
+      res.status(500).json({ error: "Internal server error", message: error.message });
     }
   }
 );

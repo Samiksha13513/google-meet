@@ -19,8 +19,10 @@ passport.use(
     async (accessToken, refreshToken, profile, done) => {
       try {
         const email = profile.emails?.[0]?.value;
+        console.log("Google profile received:", { id: profile.id, email, name: profile.displayName });
 
         if (!email) {
+          console.error("Email not provided by Google");
           return done(new Error("Google account did not provide an email"), null);
         }
 
@@ -31,6 +33,7 @@ passport.use(
         });
 
         if (!user) {
+          console.log("Creating new user:", email);
           user = await prisma.user.create({
             data: {
               googleId: profile.id,
@@ -39,7 +42,9 @@ passport.use(
               image: profile.photos?.[0]?.value,
             },
           });
+          console.log("User created successfully:", user.id);
         } else if (!user.googleId) {
+          console.log("Updating existing user with googleId:", user.id);
           user = await prisma.user.update({
             where: { id: user.id },
             data: {
@@ -47,10 +52,13 @@ passport.use(
               image: user.image || profile.photos?.[0]?.value,
             },
           });
+          console.log("User updated successfully");
         }
 
+        console.log("Calling done with user:", user.id);
         done(null, user);
       } catch (error) {
+        console.error("Passport strategy error:", error.message, error.stack);
         done(error, null);
       }
     }
