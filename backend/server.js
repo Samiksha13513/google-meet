@@ -32,6 +32,8 @@ require("./src/config/passport");
 
 const authRoutes = require("./src/routes/authRoutes");
 const meetingRoutes = require("./src/routes/meetingRoutes");
+const iceRoutes = require("./src/routes/iceRoutes");
+const twilioRoute = require("./src/routes/twilioRoute");
 
 const app = express();
 
@@ -69,6 +71,8 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 app.use("/auth", authRoutes);
+app.use("/api", iceRoutes);
+app.use("/api", twilioRoute);
 
 app.use("/meetings", meetingRoutes);
 app.use("/api/meeting", meetingRoutes);
