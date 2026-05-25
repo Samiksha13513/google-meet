@@ -26,7 +26,7 @@ function isMember(roomId, sid) {
 function setupSocket(server) {
   const allowedOrigins = new Set(
     [
-      process.env.FRONTEND_URL,
+      process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app",
       ...(process.env.FRONTEND_URLS || "").split(","),
       "http://localhost:3000",
     ]
@@ -73,7 +73,7 @@ function setupSocket(server) {
     socket.on("offer", ({ roomId, offer, targetId }) => {
       if (!roomId || !offer) return;
       console.log(new Date().toISOString(), `Offer from ${socket.id} to ${targetId || roomId}`);
-      if (targetId && isMember(roomId, targetId)) {
+      if (targetId) {
         io.to(targetId).emit("offer", { offer, senderId: socket.id });
       } else {
         socket.broadcast.to(roomId).emit("offer", { offer, senderId: socket.id });
@@ -83,7 +83,7 @@ function setupSocket(server) {
     socket.on("answer", ({ roomId, answer, targetId }) => {
       if (!roomId || !answer) return;
       console.log(new Date().toISOString(), `Answer from ${socket.id} to ${targetId || roomId}`);
-      if (targetId && isMember(roomId, targetId)) {
+      if (targetId) {
         io.to(targetId).emit("answer", { answer, senderId: socket.id });
       } else {
         socket.broadcast.to(roomId).emit("answer", { answer, senderId: socket.id });
@@ -93,13 +93,12 @@ function setupSocket(server) {
     socket.on("ice-candidate", ({ roomId, candidate, targetId }) => {
       if (!roomId || !candidate) return;
       console.log(new Date().toISOString(), `ICE candidate from ${socket.id} to ${targetId || roomId}`);
-      if (targetId && isMember(roomId, targetId)) {
+      if (targetId) {
         io.to(targetId).emit("ice-candidate", { candidate, senderId: socket.id });
       } else {
         socket.broadcast.to(roomId).emit("ice-candidate", { candidate, senderId: socket.id });
       }
     });
-
     // Allow clients to request server-provided ICE configuration via socket (optional)
     socket.on("request-ice-servers", async (callback) => {
       try {

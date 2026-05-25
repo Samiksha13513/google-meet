@@ -4,9 +4,9 @@ const router = express.Router();
 
 // Returns ephemeral TURN/STUN credentials from Twilio Network Traversal API.
 // Requires TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in env.
-// Endpoint: GET /api/twilio-ice
+// Endpoints: GET /api/twilio-ice and GET /api/turn-servers
 
-router.get("/twilio-ice", async (req, res) => {
+router.get(["/twilio-ice", "/turn-servers"], async (req, res) => {
   try {
     const sid = process.env.TWILIO_ACCOUNT_SID;
     const auth = process.env.TWILIO_AUTH_TOKEN;
