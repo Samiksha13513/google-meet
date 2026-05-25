@@ -1,32 +1,41 @@
 const { Server } = require("socket.io");
 
-const roomMembers = new Map(); // roomId -> Set(socketId)
+/** roomId -> Set<socketId> */
+const roomMembers = new Map();
 
 function normalizeRoomId(payload) {
-  if (typeof payload === "string") return payload;
-  return payload?.roomId || payload?.meetingCode;
+  if (typeof payload === "string") return payload.trim();
+  return payload?.roomId || payload?.meetingCode || null;
 }
 
-function addMember(roomId, sid) {
-  if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Set());
-  roomMembers.get(roomId).add(sid);
+function getRoomMembers(roomId) {
+  if (!roomMembers.has(roomId)) {
+    roomMembers.set(roomId, new Set());
+  }
+  return roomMembers.get(roomId);
 }
 
-function removeMember(roomId, sid) {
-  if (!roomMembers.has(roomId)) return;
+function addMember(roomId, socketId) {
+  getRoomMembers(roomId).add(socketId);
+}
+
+function removeMember(roomId, socketId) {
   const set = roomMembers.get(roomId);
-  set.delete(sid);
+  if (!set) return;
+  set.delete(socketId);
   if (set.size === 0) roomMembers.delete(roomId);
 }
 
-function isMember(roomId, sid) {
-  return roomMembers.get(roomId)?.has(sid);
+function relayToPeer(io, senderSocket, targetId, event, payload) {
+  if (!targetId || targetId === senderSocket.id) return;
+  io.to(targetId).emit(event, { ...payload, senderId: senderSocket.id });
 }
 
 function setupSocket(server) {
   const allowedOrigins = new Set(
     [
-      process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app",
+      process.env.FRONTEND_URL ||
+        "https://google-meet-frontend-theta.vercel.app",
       ...(process.env.FRONTEND_URLS || "").split(","),
       "http://localhost:3000",
     ]
@@ -49,82 +58,43 @@ function setupSocket(server) {
   });
 
   io.on("connection", (socket) => {
-    console.log(new Date().toISOString(), "User connected:", socket.id);
+    console.log(new Date().toISOString(), "Socket connected:", socket.id);
 
     socket.on("join-room", (payload) => {
-      const meetingCode = normalizeRoomId(payload);
-      if (!meetingCode) return;
+      const roomId = normalizeRoomId(payload);
+      if (!roomId) return;
 
-      socket.join(meetingCode);
-      const others = Array.from((roomMembers.get(meetingCode) || new Set())).filter((id) => id !== socket.id);
-      addMember(meetingCode, socket.id);
-      console.log(new Date().toISOString(), `User ${socket.id} joined room ${meetingCode}. Others:`, others);
+      const membersBeforeJoin = Array.from(getRoomMembers(roomId)).filter(
+        (id) => id !== socket.id
+      );
 
-      // Send existing members to the joining socket so it can initiate offers to them
-      socket.emit("existing-members", { members: others });
+      socket.join(roomId);
+      addMember(roomId, socket.id);
 
-      // Notify others that a new user joined
-      socket.broadcast.to(meetingCode).emit("user-joined", {
-        socketId: socket.id,
-      });
+      console.log(
+        new Date().toISOString(),
+        `join-room: ${socket.id} -> ${roomId}, existing:`,
+        membersBeforeJoin
+      );
+
+      socket.emit("existing-members", { members: membersBeforeJoin });
+
+      socket.to(roomId).emit("user-joined", { socketId: socket.id });
     });
 
-    // Offers/answers/ice-candidates should target a specific socketId when possible
     socket.on("offer", ({ roomId, offer, targetId }) => {
-      if (!roomId || !offer) return;
-      console.log(new Date().toISOString(), `Offer from ${socket.id} to ${targetId || roomId}`);
-      if (targetId) {
-        io.to(targetId).emit("offer", { offer, senderId: socket.id });
-      } else {
-        socket.broadcast.to(roomId).emit("offer", { offer, senderId: socket.id });
-      }
+      if (!roomId || !offer || !targetId) return;
+      relayToPeer(io, socket, targetId, "offer", { offer, roomId });
     });
 
     socket.on("answer", ({ roomId, answer, targetId }) => {
-      if (!roomId || !answer) return;
-      console.log(new Date().toISOString(), `Answer from ${socket.id} to ${targetId || roomId}`);
-      if (targetId) {
-        io.to(targetId).emit("answer", { answer, senderId: socket.id });
-      } else {
-        socket.broadcast.to(roomId).emit("answer", { answer, senderId: socket.id });
-      }
+      if (!roomId || !answer || !targetId) return;
+      relayToPeer(io, socket, targetId, "answer", { answer, roomId });
     });
 
     socket.on("ice-candidate", ({ roomId, candidate, targetId }) => {
-      if (!roomId || !candidate) return;
-      console.log(new Date().toISOString(), `ICE candidate from ${socket.id} to ${targetId || roomId}`);
-      if (targetId) {
-        io.to(targetId).emit("ice-candidate", { candidate, senderId: socket.id });
-      } else {
-        socket.broadcast.to(roomId).emit("ice-candidate", { candidate, senderId: socket.id });
-      }
-    });
-    // Allow clients to request server-provided ICE configuration via socket (optional)
-    socket.on("request-ice-servers", async (callback) => {
-      try {
-        // prefer environment-provided JSON
-        if (process.env.ICE_SERVERS_JSON) {
-          return callback({ iceServers: JSON.parse(process.env.ICE_SERVERS_JSON) });
-        }
-
-        const iceServers = [{ urls: ["stun:stun.l.google.com:19302"] }];
-        if (process.env.TURN_URL) {
-          const turn = { urls: process.env.TURN_URL };
-          if (process.env.TURN_USERNAME) turn.username = process.env.TURN_USERNAME;
-          if (process.env.TURN_PASSWORD) turn.credential = process.env.TURN_PASSWORD;
-          iceServers.push(turn);
-        }
-
-        if (process.env.TURN_URLS) {
-          const urls = process.env.TURN_URLS.split(";").map((u) => u.trim()).filter(Boolean);
-          urls.forEach((u) => iceServers.push({ urls: u, username: process.env.TURN_USERNAME, credential: process.env.TURN_PASSWORD }));
-        }
-
-        return callback({ iceServers });
-      } catch (err) {
-        console.error("request-ice-servers failed:", err.message);
-        return callback({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
-      }
+      if (!roomId || !candidate || !targetId) return;
+      relayToPeer(io, socket, targetId, "ice-candidate", { candidate, roomId });
     });
 
     socket.on("leave-room", (payload) => {
@@ -133,20 +103,20 @@ function setupSocket(server) {
 
       removeMember(roomId, socket.id);
       socket.leave(roomId);
-      socket.broadcast.to(roomId).emit("user-left", { socketId: socket.id });
-      console.log(new Date().toISOString(), `User ${socket.id} left room ${roomId}`);
+      socket.to(roomId).emit("user-left", { socketId: socket.id });
+      console.log(new Date().toISOString(), `leave-room: ${socket.id} <- ${roomId}`);
     });
 
     socket.on("disconnecting", () => {
-      const rooms = Array.from(socket.rooms).filter((r) => r !== socket.id);
-      rooms.forEach((roomId) => {
+      for (const roomId of socket.rooms) {
+        if (roomId === socket.id) continue;
         removeMember(roomId, socket.id);
-        socket.broadcast.to(roomId).emit("user-left", { socketId: socket.id });
-      });
+        socket.to(roomId).emit("user-left", { socketId: socket.id });
+      }
     });
 
     socket.on("disconnect", () => {
-      console.log(new Date().toISOString(), "User disconnected:", socket.id);
+      console.log(new Date().toISOString(), "Socket disconnected:", socket.id);
     });
   });
 }
