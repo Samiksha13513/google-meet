@@ -93,8 +93,16 @@ function setupSocket(server) {
     });
 
     socket.on("ice-candidate", ({ roomId, candidate, targetId }) => {
-      if (!roomId || !candidate || !targetId) return;
-      relayToPeer(io, socket, targetId, "ice-candidate", { candidate, roomId });
+      if (!roomId || !candidate) return;
+      if (targetId) {
+        relayToPeer(io, socket, targetId, "ice-candidate", { candidate, roomId });
+      } else {
+        socket.to(roomId).emit("ice-candidate", {
+          candidate,
+          roomId,
+          senderId: socket.id,
+        });
+      }
     });
 
     socket.on("leave-room", (payload) => {
