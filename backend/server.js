@@ -36,12 +36,19 @@ const iceRoutes = require("./src/routes/iceRoutes");
 const twilioRoute = require("./src/routes/twilioRoute");
 
 const app = express();
+app.set("trust proxy", 1);
 
 const frontendUrl =
   process.env.FRONTEND_URL ||
   "https://google-meet-frontend-theta.vercel.app";
 const allowedOrigins = new Set(
-  [frontendUrl, "http://localhost:3000"].map((url) => url.replace(/\/$/, ""))
+  [
+    frontendUrl,
+    ...(process.env.FRONTEND_URLS || "").split(","),
+    "http://localhost:3000",
+  ]
+    .filter(Boolean)
+    .map((url) => url.trim().replace(/\/$/, ""))
 );
 
 app.use(
@@ -95,6 +102,8 @@ const server = http.createServer(app);
 
 setupSocket(server);
 
-server.listen(5000,  "0.0.0.0", () => {
-  console.log("Server running on port 5000");
+const port = process.env.PORT || 5000;
+
+server.listen(port, "0.0.0.0", () => {
+  console.log(`Server running on port ${port}`);
 });

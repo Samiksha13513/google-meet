@@ -1,37 +1,63 @@
 const { Server } = require("socket.io");
 
+const roomMembers = new Map(); // roomId -> Set(socketId)
+
+function normalizeRoomId(payload) {
+  if (typeof payload === "string") return payload;
+  return payload?.roomId || payload?.meetingCode;
+}
+
+function addMember(roomId, sid) {
+  if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Set());
+  roomMembers.get(roomId).add(sid);
+}
+
+function removeMember(roomId, sid) {
+  if (!roomMembers.has(roomId)) return;
+  const set = roomMembers.get(roomId);
+  set.delete(sid);
+  if (set.size === 0) roomMembers.delete(roomId);
+}
+
+function isMember(roomId, sid) {
+  return roomMembers.get(roomId)?.has(sid);
+}
+
 function setupSocket(server) {
+  const allowedOrigins = new Set(
+    [
+      process.env.FRONTEND_URL,
+      ...(process.env.FRONTEND_URLS || "").split(","),
+      "http://localhost:3000",
+    ]
+      .filter(Boolean)
+      .map((origin) => origin.trim().replace(/\/$/, ""))
+  );
+
   const io = new Server(server, {
     cors: {
-      origin: "*",
+      origin: (origin, callback) => {
+        if (!origin || allowedOrigins.has(origin.replace(/\/$/, ""))) {
+          callback(null, true);
+        } else {
+          callback(new Error("Not allowed by Socket.IO CORS"));
+        }
+      },
       methods: ["GET", "POST"],
+      credentials: true,
     },
   });
 
   io.on("connection", (socket) => {
     console.log(new Date().toISOString(), "User connected:", socket.id);
 
-    // Track members per room for targeted signaling
-    const roomMembers = new Map(); // roomId -> Set(socketId)
-
-    function addMember(roomId, sid) {
-      if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Set());
-      roomMembers.get(roomId).add(sid);
-    }
-
-    function removeMember(roomId, sid) {
-      if (!roomMembers.has(roomId)) return;
-      const set = roomMembers.get(roomId);
-      set.delete(sid);
-      if (set.size === 0) roomMembers.delete(roomId);
-    }
-
-    socket.on("join-room", (meetingCode) => {
+    socket.on("join-room", (payload) => {
+      const meetingCode = normalizeRoomId(payload);
       if (!meetingCode) return;
 
       socket.join(meetingCode);
-      addMember(meetingCode, socket.id);
       const others = Array.from((roomMembers.get(meetingCode) || new Set())).filter((id) => id !== socket.id);
+      addMember(meetingCode, socket.id);
       console.log(new Date().toISOString(), `User ${socket.id} joined room ${meetingCode}. Others:`, others);
 
       // Send existing members to the joining socket so it can initiate offers to them
@@ -47,7 +73,7 @@ function setupSocket(server) {
     socket.on("offer", ({ roomId, offer, targetId }) => {
       if (!roomId || !offer) return;
       console.log(new Date().toISOString(), `Offer from ${socket.id} to ${targetId || roomId}`);
-      if (targetId) {
+      if (targetId && isMember(roomId, targetId)) {
         io.to(targetId).emit("offer", { offer, senderId: socket.id });
       } else {
         socket.broadcast.to(roomId).emit("offer", { offer, senderId: socket.id });
@@ -57,7 +83,7 @@ function setupSocket(server) {
     socket.on("answer", ({ roomId, answer, targetId }) => {
       if (!roomId || !answer) return;
       console.log(new Date().toISOString(), `Answer from ${socket.id} to ${targetId || roomId}`);
-      if (targetId) {
+      if (targetId && isMember(roomId, targetId)) {
         io.to(targetId).emit("answer", { answer, senderId: socket.id });
       } else {
         socket.broadcast.to(roomId).emit("answer", { answer, senderId: socket.id });
@@ -67,7 +93,7 @@ function setupSocket(server) {
     socket.on("ice-candidate", ({ roomId, candidate, targetId }) => {
       if (!roomId || !candidate) return;
       console.log(new Date().toISOString(), `ICE candidate from ${socket.id} to ${targetId || roomId}`);
-      if (targetId) {
+      if (targetId && isMember(roomId, targetId)) {
         io.to(targetId).emit("ice-candidate", { candidate, senderId: socket.id });
       } else {
         socket.broadcast.to(roomId).emit("ice-candidate", { candidate, senderId: socket.id });
@@ -100,6 +126,16 @@ function setupSocket(server) {
         console.error("request-ice-servers failed:", err.message);
         return callback({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
       }
+    });
+
+    socket.on("leave-room", (payload) => {
+      const roomId = normalizeRoomId(payload);
+      if (!roomId) return;
+
+      removeMember(roomId, socket.id);
+      socket.leave(roomId);
+      socket.broadcast.to(roomId).emit("user-left", { socketId: socket.id });
+      console.log(new Date().toISOString(), `User ${socket.id} left room ${roomId}`);
     });
 
     socket.on("disconnecting", () => {

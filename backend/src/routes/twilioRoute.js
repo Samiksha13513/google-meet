@@ -36,7 +36,14 @@ router.get("/twilio-ice", async (req, res) => {
     const body = await resp.json();
 
     // Twilio returns ice_servers in the response
-    const iceServers = body.ice_servers || body.iceServers || [];
+    const iceServers = (body.ice_servers || body.iceServers || [])
+      .map((server) => ({
+        urls: server.urls || server.url,
+        username: server.username,
+        credential: server.credential,
+        credentialType: server.credentialType,
+      }))
+      .filter((server) => Boolean(server.urls));
 
     return res.json({ iceServers });
   } catch (err) {
