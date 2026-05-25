@@ -26,11 +26,6 @@ function removeMember(roomId, socketId) {
   if (set.size === 0) roomMembers.delete(roomId);
 }
 
-function relayToPeer(io, senderSocket, targetId, event, payload) {
-  if (!targetId || targetId === senderSocket.id) return;
-  io.to(targetId).emit(event, { ...payload, senderId: senderSocket.id });
-}
-
 function setupSocket(server) {
   const allowedOrigins = new Set(
     [
@@ -77,32 +72,38 @@ function setupSocket(server) {
         membersBeforeJoin
       );
 
+      // Only to the joining client
       socket.emit("existing-members", { members: membersBeforeJoin });
 
-      socket.to(roomId).emit("user-joined", { socketId: socket.id });
+      // To everyone else in the room (not sender)
+      socket.broadcast.to(roomId).emit("user-joined", { socketId: socket.id });
     });
 
-    socket.on("offer", ({ roomId, offer, targetId }) => {
-      if (!roomId || !offer || !targetId) return;
-      relayToPeer(io, socket, targetId, "offer", { offer, roomId });
+    socket.on("offer", ({ roomId, offer }) => {
+      if (!roomId || !offer) return;
+      socket.broadcast.to(roomId).emit("offer", {
+        offer,
+        senderId: socket.id,
+        roomId,
+      });
     });
 
-    socket.on("answer", ({ roomId, answer, targetId }) => {
-      if (!roomId || !answer || !targetId) return;
-      relayToPeer(io, socket, targetId, "answer", { answer, roomId });
+    socket.on("answer", ({ roomId, answer }) => {
+      if (!roomId || !answer) return;
+      socket.broadcast.to(roomId).emit("answer", {
+        answer,
+        senderId: socket.id,
+        roomId,
+      });
     });
 
-    socket.on("ice-candidate", ({ roomId, candidate, targetId }) => {
+    socket.on("ice-candidate", ({ roomId, candidate }) => {
       if (!roomId || !candidate) return;
-      if (targetId) {
-        relayToPeer(io, socket, targetId, "ice-candidate", { candidate, roomId });
-      } else {
-        socket.to(roomId).emit("ice-candidate", {
-          candidate,
-          roomId,
-          senderId: socket.id,
-        });
-      }
+      socket.broadcast.to(roomId).emit("ice-candidate", {
+        candidate,
+        senderId: socket.id,
+        roomId,
+      });
     });
 
     socket.on("leave-room", (payload) => {
@@ -111,15 +112,18 @@ function setupSocket(server) {
 
       removeMember(roomId, socket.id);
       socket.leave(roomId);
-      socket.to(roomId).emit("user-left", { socketId: socket.id });
-      console.log(new Date().toISOString(), `leave-room: ${socket.id} <- ${roomId}`);
+      socket.broadcast.to(roomId).emit("user-left", { socketId: socket.id });
+      console.log(
+        new Date().toISOString(),
+        `leave-room: ${socket.id} <- ${roomId}`
+      );
     });
 
     socket.on("disconnecting", () => {
       for (const roomId of socket.rooms) {
         if (roomId === socket.id) continue;
         removeMember(roomId, socket.id);
-        socket.to(roomId).emit("user-left", { socketId: socket.id });
+        socket.broadcast.to(roomId).emit("user-left", { socketId: socket.id });
       }
     });
 
