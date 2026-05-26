@@ -11,6 +11,14 @@ const { Server } = require("socket.io");
  */
 const rooms = new Map();
 
+function resolveIdentityLabel({ displayName, email, socketId }) {
+  return (
+    (email && String(email).trim()) ||
+    (displayName && String(displayName).trim()) ||
+    `User ${String(socketId).slice(0, 6)}`
+  );
+}
+
 function normalizeRoomId(payload) {
   if (typeof payload === "string") return payload.trim();
   return payload?.roomId || payload?.meetingCode || null;
@@ -119,7 +127,7 @@ function setupSocket(server) {
       const isFirst = room.activeMembers.size === 0;
       const memberDetail = {
         socketId: socket.id,
-        displayName: displayName || email || "Guest",
+        displayName: resolveIdentityLabel({ displayName, email, socketId: socket.id }),
         email: email || "",
         image: image || "",
         isMicOn: isMicOn !== false,
@@ -174,7 +182,9 @@ function setupSocket(server) {
         const otherActiveMembers = Array.from(room.activeMembers).filter(
           (id) => id !== socketId
         );
-        const membersList = otherActiveMembers.map((id) => room.details.get(id));
+        const membersList = otherActiveMembers
+          .map((id) => room.details.get(id))
+          .filter(Boolean);
 
         // approved socket joins room
         const approvedSocket = io.sockets.sockets.get(socketId);
@@ -277,9 +287,14 @@ function setupSocket(server) {
     // Chat room messaging
     socket.on("send-message", ({ roomId, message, senderName }) => {
       if (!roomId || !message) return;
+      const details = rooms.get(roomId)?.details.get(socket.id);
       io.to(roomId).emit("receive-message", {
         senderId: socket.id,
-        senderName: senderName || "Anonymous",
+        senderName:
+          details?.email ||
+          details?.displayName ||
+          senderName ||
+          resolveIdentityLabel({ socketId: socket.id }),
         message,
         timestamp: Date.now(),
       });
