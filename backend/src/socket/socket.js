@@ -104,6 +104,7 @@ function setupSocket(server) {
 
     // Dynamic join request / direct enter if first
     socket.on("join-request", ({ roomId: rawRoomId, displayName, email, image, isMicOn, isCameraOn }) => {
+      console.log(`[Socket] join-request received from ${socket.id} ->`, { displayName, email, image });
       const roomId = normalizeRoomId(rawRoomId);
       if (!roomId) return;
 
@@ -186,6 +187,7 @@ function setupSocket(server) {
           .map((id) => room.details.get(id))
           .filter(Boolean);
 
+        console.log(`[Socket] approve-join by ${socket.id} for ${socketId} — sending members:`, membersList);
         // approved socket joins room
         const approvedSocket = io.sockets.sockets.get(socketId);
         if (approvedSocket) {
