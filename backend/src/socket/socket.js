@@ -11,11 +11,11 @@ const { Server } = require("socket.io");
  */
 const rooms = new Map();
 
-function resolveIdentityLabel({ displayName, email, socketId }) {
+function resolveIdentityLabel({ displayName, email }) {
   return (
     (email && String(email).trim()) ||
     (displayName && String(displayName).trim()) ||
-    `User ${String(socketId).slice(0, 6)}`
+    "Guest"
   );
 }
 
@@ -128,7 +128,7 @@ function setupSocket(server) {
       const isFirst = room.activeMembers.size === 0;
       const memberDetail = {
         socketId: socket.id,
-        displayName: resolveIdentityLabel({ displayName, email, socketId: socket.id }),
+      displayName: email || displayName || "Guest",
         email: email || "",
         image: image || "",
         isMicOn: isMicOn !== false,
