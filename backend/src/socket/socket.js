@@ -95,7 +95,7 @@ function setupSocket(server) {
     console.log(new Date().toISOString(), "Socket connected:", socket.id);
 
     // Dynamic join request / direct enter if first
-    socket.on("join-request", ({ roomId: rawRoomId, displayName }) => {
+    socket.on("join-request", ({ roomId: rawRoomId, displayName, email, image, isMicOn, isCameraOn }) => {
       const roomId = normalizeRoomId(rawRoomId);
       if (!roomId) return;
 
@@ -119,9 +119,11 @@ function setupSocket(server) {
       const isFirst = room.activeMembers.size === 0;
       const memberDetail = {
         socketId: socket.id,
-        displayName: displayName || "Guest",
-        isMicOn: true,
-        isCameraOn: true,
+        displayName: displayName || email || "Guest",
+        email: email || "",
+        image: image || "",
+        isMicOn: isMicOn !== false,
+        isCameraOn: isCameraOn !== false,
         isScreenSharing: false,
         isHost: isFirst,
       };
@@ -150,6 +152,8 @@ function setupSocket(server) {
           io.to(room.hostId).emit("join-request", {
             socketId: socket.id,
             displayName: memberDetail.displayName,
+            email: memberDetail.email,
+            image: memberDetail.image,
           });
         }
       }
@@ -239,6 +243,9 @@ function setupSocket(server) {
         socketId: socket.id,
         isMicOn: details.isMicOn,
         isCameraOn: details.isCameraOn,
+        displayName: details.displayName,
+        email: details.email,
+        image: details.image,
       });
     });
 

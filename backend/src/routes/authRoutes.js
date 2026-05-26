@@ -38,8 +38,17 @@ router.get(
         }
       );
 
+      const user = encodeURIComponent(
+        JSON.stringify({
+          id: req.user.id,
+          name: req.user.name,
+          email: req.user.email,
+          image: req.user.image,
+        })
+      );
+
       console.log("Token generated successfully, redirecting to:", `${frontendUrl}/auth/callback`);
-      res.redirect(`${frontendUrl}/auth/callback?token=${token}`);
+      res.redirect(`${frontendUrl}/auth/callback?token=${token}&user=${user}`);
     } catch (error) {
       console.error("Auth callback error:", error.message, error.stack);
       res.status(500).json({ error: "Internal server error", message: error.message });
