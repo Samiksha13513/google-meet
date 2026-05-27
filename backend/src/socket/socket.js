@@ -13,11 +13,11 @@ const prisma = require("../config/prisma");
  */
 const rooms = new Map();
 
-function resolveIdentityLabel({ displayName, email, socketId }) {
+function resolveIdentityLabel({ displayName, email }) {
   return (
     (email && String(email).trim()) ||
     (displayName && String(displayName).trim()) ||
-    `User ${String(socketId).slice(0, 6)}`
+    "Guest"
   );
 }
 
@@ -217,6 +217,7 @@ function setupSocket(server) {
           .map((id) => room.details.get(id))
           .filter(Boolean);
 
+        console.log(`[Socket] approve-join by ${socket.id} for ${socketId} — sending members:`, membersList);
         // approved socket joins room
         const approvedSocket = io.sockets.sockets.get(socketId);
         if (approvedSocket) {
