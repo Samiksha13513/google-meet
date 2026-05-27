@@ -13,12 +13,13 @@ const prisma = require("../config/prisma");
  */
 const rooms = new Map();
 
-function resolveIdentityLabel({ displayName, email }) {
-  return (
-    (email && String(email).trim()) ||
-    (displayName && String(displayName).trim()) ||
-    "Guest"
-  );
+function resolveParticipantName({ displayName, email }) {
+  const name = displayName && String(displayName).trim();
+  if (name) return name;
+  if (email && String(email).trim()) {
+    return String(email).split("@")[0];
+  }
+  return "Guest";
 }
 
 function normalizeRoomId(payload) {
@@ -323,10 +324,9 @@ function setupSocket(server) {
       io.to(roomId).emit("receive-message", {
         senderId: socket.id,
         senderName:
-          details?.email ||
           details?.displayName ||
           senderName ||
-          resolveIdentityLabel({ socketId: socket.id }),
+          resolveParticipantName(details || {}),
         message,
         timestamp: Date.now(),
       });
