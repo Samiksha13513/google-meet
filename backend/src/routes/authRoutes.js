@@ -3,44 +3,42 @@ const passport = require("passport");
 const jwt = require("jsonwebtoken");
 
 const router = express.Router();
-const frontendUrl = (
-  process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app"
-).replace(/\/$/, "");
+const frontendUrl = (process.env.FRONTEND_URL || "https://google-meet-frontend-theta.vercel.app").replace(/\/$/, "");
 
-function safeReturnPath(value) {
-  if (!value || typeof value !== "string") return "/dashboard";
-  if (!value.startsWith("/") || value.startsWith("//")) return "/dashboard";
-  return value;
-}
-
-router.get("/google", (req, res, next) => {
-  const returnTo = safeReturnPath(req.query.returnTo);
+router.get(
+  "/google",
   passport.authenticate("google", {
-    scope: ["profile", "email"],
-    state: Buffer.from(JSON.stringify({ returnTo })).toString("base64url"),
-  })(req, res, next);
-});
+    scope: "profile email",
+  })
+);
+
 
 router.get(
   "/google/callback",
   passport.authenticate("google", {
-    failureRedirect: `${frontendUrl}/?authError=google_signin_failed`,
+    failureRedirect: "/login",
   }),
   (req, res) => {
     try {
+      console.log("Callback received, user:", req.user);
+      
       if (!req.user) {
-        return res.redirect(
-          `${frontendUrl}/?authError=${encodeURIComponent("User not authenticated")}`
-        );
+        console.error("User not found after authentication");
+        return res.status(401).json({ error: "User not authenticated" });
       }
 
       const token = jwt.sign(
-        { id: req.user.id, email: req.user.email },
+        {
+          id: req.user.id,
+          email: req.user.email,
+        },
         process.env.JWT_SECRET,
-        { expiresIn: "7d" }
+        {
+          expiresIn: "7d",
+        }
       );
 
-      const userPayload = encodeURIComponent(
+      const user = encodeURIComponent(
         JSON.stringify({
           id: req.user.id,
           name: req.user.name,
@@ -49,27 +47,12 @@ router.get(
         })
       );
 
-      let returnTo = "/dashboard";
-      try {
-        if (req.query.state) {
-          const state = JSON.parse(
-            Buffer.from(String(req.query.state), "base64url").toString("utf8")
-          );
-          returnTo = safeReturnPath(state.returnTo);
-        }
-      } catch {
-        // use default
-      }
-
-      const redirectUrl = `${frontendUrl}/auth/callback?token=${token}&user=${userPayload}&returnTo=${encodeURIComponent(returnTo)}`;
-      res.redirect(redirectUrl);
+      console.log("Token generated successfully, redirecting to:", `${frontendUrl}/auth/callback`);
+      res.redirect(`${frontendUrl}/auth/callback?token=${token}&user=${user}`);
     } catch (error) {
-      console.error("Auth callback error:", error.message);
-      res.redirect(
-        `${frontendUrl}/?authError=${encodeURIComponent("Internal server error")}`
-      );
+      console.error("Auth callback error:", error.message, error.stack);
+      res.status(500).json({ error: "Internal server error", message: error.message });
     }
   }
 );
-
 module.exports = router;
