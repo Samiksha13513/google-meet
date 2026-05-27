@@ -1,4 +1,6 @@
 const { Server } = require("socket.io");
+const jwt = require("jsonwebtoken");
+const prisma = require("../config/prisma");
 
 /**
  * Room Data Store (In-Memory)
@@ -103,7 +105,7 @@ function setupSocket(server) {
     console.log(new Date().toISOString(), "Socket connected:", socket.id);
 
     // Dynamic join request / direct enter if first
-    socket.on("join-request", ({ roomId: rawRoomId, displayName, email, image, isMicOn, isCameraOn }) => {
+    socket.on("join-request", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
       const roomId = normalizeRoomId(rawRoomId);
       if (!roomId) return;
 
@@ -124,12 +126,41 @@ function setupSocket(server) {
         return;
       }
 
+      let email = "";
+      let image = "";
+      let resolvedDisplayName = displayName;
+
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          if (decoded && decoded.id) {
+            const user = await prisma.user.findUnique({
+              where: { id: decoded.id }
+            });
+            if (user) {
+              resolvedDisplayName = user.name || user.email || displayName;
+              email = user.email || "";
+              image = user.image || "";
+            }
+          }
+        } catch (err) {
+          console.error("[Socket] token verification failed:", err.message);
+        }
+      }
+
+      // Guest: show display name only, email and image must be empty
+      if (!email) {
+        email = "";
+        image = "";
+        resolvedDisplayName = displayName || `Guest ${socket.id.slice(0, 6)}`;
+      }
+
       const isFirst = room.activeMembers.size === 0;
       const memberDetail = {
         socketId: socket.id,
-        displayName: resolveIdentityLabel({ displayName, email, socketId: socket.id }),
-        email: email || "",
-        image: image || "",
+        displayName: resolvedDisplayName,
+        email,
+        image,
         isMicOn: isMicOn !== false,
         isCameraOn: isCameraOn !== false,
         isScreenSharing: false,
