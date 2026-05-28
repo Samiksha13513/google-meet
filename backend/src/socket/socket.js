@@ -163,6 +163,7 @@ function setupSocket(server) {
         image,
         isMicOn: isMicOn !== false,
         isCameraOn: isCameraOn !== false,
+        isHandRaised: false,
         isScreenSharing: false,
         isHost: isFirst,
       };
@@ -285,9 +286,23 @@ function setupSocket(server) {
         socketId: socket.id,
         isMicOn: details.isMicOn,
         isCameraOn: details.isCameraOn,
+        isHandRaised: details.isHandRaised,
         displayName: details.displayName,
         email: details.email,
         image: details.image,
+      });
+    });
+
+    socket.on("raise-hand", ({ roomId, isHandRaised }) => {
+      const room = rooms.get(roomId);
+      if (!room || !room.details.has(socket.id)) return;
+
+      const details = room.details.get(socket.id);
+      details.isHandRaised = Boolean(isHandRaised);
+
+      socket.broadcast.to(roomId).emit("raise-hand-changed", {
+        senderId: socket.id,
+        isHandRaised: details.isHandRaised,
       });
     });
 
