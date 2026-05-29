@@ -67,6 +67,13 @@ function setupSocket(server) {
 
     // 2. Clean up active user
     if (room.activeMembers.has(socket.id)) {
+      const leavingDetails = room.details.get(socket.id);
+      if (leavingDetails?.isScreenSharing) {
+        socket.broadcast.to(roomId).emit("screen-share-stopped", {
+          senderId: socket.id,
+        });
+      }
+
       room.activeMembers.delete(socket.id);
       room.details.delete(socket.id);
       socket.leave(roomId);
