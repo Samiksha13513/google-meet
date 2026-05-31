@@ -39,6 +39,7 @@ passport.use(
               googleId: profile.id,
               name: profile.displayName,
               email,
+              avatar: profile.photos?.[0]?.value,
               image: profile.photos?.[0]?.value,
             },
           });
@@ -49,6 +50,7 @@ passport.use(
             where: { id: user.id },
             data: {
               googleId: profile.id,
+              avatar: user.avatar || user.image || profile.photos?.[0]?.value,
               image: user.image || profile.photos?.[0]?.value,
             },
           });

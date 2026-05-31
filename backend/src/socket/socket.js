@@ -47,6 +47,25 @@ function normalizeRoomId(payload) {
   return payload?.roomId || payload?.meetingCode || null;
 }
 
+async function touchRecentContact(userId, contactUserId, at = new Date()) {
+  if (!userId || !contactUserId || userId === contactUserId) return;
+
+  await prisma.recentContact.upsert({
+    where: {
+      userId_contactUserId: {
+        userId,
+        contactUserId,
+      },
+    },
+    update: { lastInteractionAt: at },
+    create: {
+      userId,
+      contactUserId,
+      lastInteractionAt: at,
+    },
+  });
+}
+
 function setupSocket(server) {
   const allowedOrigins = new Set(
     [
@@ -89,6 +108,16 @@ function setupSocket(server) {
     // 2. Clean up active user
     if (room.activeMembers.has(socket.id)) {
       const leavingDetails = room.details.get(socket.id);
+      if (leavingDetails?.participantRecordId) {
+        prisma.meetingParticipant
+          .update({
+            where: { id: leavingDetails.participantRecordId },
+            data: { leftAt: new Date() },
+          })
+          .catch((err) =>
+            console.warn("[Socket] participant leave persistence failed:", err.message)
+          );
+      }
       if (leavingDetails?.isScreenSharing) {
         socket.broadcast.to(roomId).emit("screen-share-stopped", {
           senderId: socket.id,
@@ -118,9 +147,52 @@ function setupSocket(server) {
           console.log(`[Socket] Host promoted to ${newHostId} in room ${roomId}`);
         } else {
           room.hostId = null;
-        }
       }
     }
+  }
+
+  async function persistApprovedParticipant(roomId, socketId) {
+    const room = rooms.get(roomId);
+    const details = room?.details.get(socketId);
+    if (!room || !details || details.participantRecordId) return;
+
+    try {
+      const meeting = await prisma.meeting.findUnique({
+        where: { meetingCode: roomId },
+        select: { id: true },
+      });
+
+      if (!meeting) return;
+
+      const participant = await prisma.meetingParticipant.create({
+        data: {
+          meetingId: meeting.id,
+          userId: details.userId || null,
+          displayName: details.displayName || "Guest",
+          email: details.email || null,
+          avatar: details.image || null,
+        },
+      });
+
+      details.participantRecordId = participant.id;
+
+      if (details.userId) {
+        const now = new Date();
+        const otherUserIds = Array.from(room.activeMembers)
+          .map((id) => room.details.get(id)?.userId)
+          .filter((userId) => userId && userId !== details.userId);
+
+        await Promise.all(
+          otherUserIds.flatMap((otherUserId) => [
+            touchRecentContact(details.userId, otherUserId, now),
+            touchRecentContact(otherUserId, details.userId, now),
+          ])
+        );
+      }
+    } catch (err) {
+      console.warn("[Socket] participant join persistence failed:", err.message);
+    }
+  }
 
     // 4. Delete room if completely empty
     if (room.activeMembers.size === 0 && room.pendingMembers.size === 0) {
@@ -171,6 +243,7 @@ function setupSocket(server) {
 
       let email = "";
       let image = "";
+      let authenticatedUserId = null;
       let resolvedDisplayName = displayName;
 
       if (token) {
@@ -181,9 +254,10 @@ function setupSocket(server) {
               where: { id: decoded.id }
             });
             if (user) {
+              authenticatedUserId = user.id;
               resolvedDisplayName = user.name || user.email || displayName;
               email = user.email || "";
-              image = user.image || "";
+              image = user.avatar || user.image || "";
             }
           }
         } catch (err) {
@@ -201,6 +275,7 @@ function setupSocket(server) {
       const isFirst = room.activeMembers.size === 0;
       const memberDetail = {
         socketId: socket.id,
+        userId: authenticatedUserId,
         displayName: resolvedDisplayName,
         email,
         image,
@@ -225,6 +300,7 @@ function setupSocket(server) {
           roomId,
           members: [],
         });
+        void persistApprovedParticipant(roomId, socket.id);
       } else {
         // Waiting room flow for all subsequent participants
         room.pendingMembers.add(socket.id);
@@ -277,6 +353,7 @@ function setupSocket(server) {
         // Notify active members in room
         socket.broadcast.to(roomId).emit("participant-joined", details);
         console.log(`[Socket] Host ${socket.id} approved ${socketId} in room ${roomId}`);
+        void persistApprovedParticipant(roomId, socketId);
       }
     });
 
