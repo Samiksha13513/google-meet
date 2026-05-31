@@ -230,6 +230,7 @@ function setupSocket(server) {
           activeMembers: new Set(),
           pendingMembers: new Set(),
           details: new Map(),
+          messages: [],
         });
       }
 
@@ -299,6 +300,7 @@ function setupSocket(server) {
           isHost: true,
           roomId,
           members: [],
+          chatHistory: room.messages || [],
         });
         void persistApprovedParticipant(roomId, socket.id);
       } else {
@@ -350,6 +352,7 @@ function setupSocket(server) {
           isHost: false,
           roomId,
           members: membersList,
+          chatHistory: room.messages || [],
         });
 
         // Notify active members in room
@@ -503,25 +506,37 @@ function setupSocket(server) {
     // Chat room messaging
     socket.on("send-message", ({ roomId, message, senderName }) => {
       if (!roomId || !message) return;
-      const details = rooms.get(roomId)?.details.get(socket.id);
-      io.to(roomId).emit("receive-message", {
+      const room = rooms.get(roomId);
+      if (!room) return;
+      const details = room.details.get(socket.id);
+      const payload = {
+        id: `${Date.now()}-${socket.id}`,
         senderId: socket.id,
         senderName:
-          details?.email ||
           details?.displayName ||
           senderName ||
           resolveIdentityLabel({ socketId: socket.id }),
-        message,
+        senderEmail: details?.email || "",
+        senderImage: details?.image || "",
+        message: String(message).trim(),
         timestamp: Date.now(),
-      });
+      };
+      if (!payload.message) return;
+
+      room.messages = [...(room.messages || []), payload].slice(-200);
+      io.to(roomId).emit("receive-message", payload);
     });
 
     // Real-time emoji reaction syncing
     socket.on("emoji-reaction", ({ roomId, emoji }) => {
       if (!roomId || !emoji) return;
-      socket.broadcast.to(roomId).emit("emoji-reaction", {
+      const details = rooms.get(roomId)?.details.get(socket.id);
+      io.to(roomId).emit("emoji-reaction", {
         senderId: socket.id,
         emoji,
+        senderName: details?.displayName || resolveIdentityLabel({ socketId: socket.id }),
+        senderEmail: details?.email || "",
+        senderImage: details?.image || "",
       });
     });
 
