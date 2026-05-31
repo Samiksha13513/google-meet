@@ -15,7 +15,11 @@ model User {
   googleId  String?  @unique
   createdAt DateTime @default(now())
 
-meetings  Meeting[]
+  meetings  Meeting[]
+  callsMade     Call[]      @relation("CallCaller")
+  callsReceived Call[]      @relation("CallReceiver")
+  callHistoriesInitiated CallHistory[] @relation("CallerHistory")
+  callHistoriesReceived  CallHistory[] @relation("ReceiverHistory")
 }
 
 model Meeting {
@@ -54,4 +58,6 @@ model CallHistory {
   createdAt DateTime @default(now())
 
   call Call @relation(fields: [callId], references: [id])
+  caller   User @relation("CallerHistory", fields: [callerId], references: [id])
+  receiver User @relation("ReceiverHistory", fields: [receiverId], references: [id])
 }

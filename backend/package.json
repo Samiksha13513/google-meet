@@ -3,12 +3,11 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-  "dev": "nodemon server.js",
-  "start": "node server.js",
-  "build": "prisma generate && prisma migrate deploy && echo Build completed",
-  "postinstall": "prisma generate"
-  "postinstall": "prisma generate"
-},
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "build": "prisma generate && node ./scripts/maybe-migrate.js && echo Build completed",
+    "postinstall": "prisma generate"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
