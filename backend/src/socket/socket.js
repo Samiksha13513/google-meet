@@ -147,7 +147,14 @@ function setupSocket(server) {
           console.log(`[Socket] Host promoted to ${newHostId} in room ${roomId}`);
         } else {
           room.hostId = null;
+        }
       }
+    }
+
+    // 4. Delete room if completely empty
+    if (room.activeMembers.size === 0 && room.pendingMembers.size === 0) {
+      rooms.delete(roomId);
+      console.log(`[Socket] Room ${roomId} completely deleted`);
     }
   }
 
@@ -191,13 +198,6 @@ function setupSocket(server) {
       }
     } catch (err) {
       console.warn("[Socket] participant join persistence failed:", err.message);
-    }
-  }
-
-    // 4. Delete room if completely empty
-    if (room.activeMembers.size === 0 && room.pendingMembers.size === 0) {
-      rooms.delete(roomId);
-      console.log(`[Socket] Room ${roomId} completely deleted`);
     }
   }
 
@@ -328,6 +328,8 @@ function setupSocket(server) {
         room.activeMembers.add(socketId);
 
         const details = room.details.get(socketId);
+        if (!details) return;
+        details.isHost = false;
 
         // Fetch other active members details to supply to approved user
         const otherActiveMembers = Array.from(room.activeMembers).filter(
@@ -351,7 +353,7 @@ function setupSocket(server) {
         });
 
         // Notify active members in room
-        socket.broadcast.to(roomId).emit("participant-joined", details);
+        io.to(roomId).emit("participant-joined", details);
         console.log(`[Socket] Host ${socket.id} approved ${socketId} in room ${roomId}`);
         void persistApprovedParticipant(roomId, socketId);
       }
