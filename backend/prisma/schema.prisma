@@ -27,3 +27,31 @@ model Meeting {
 
   host User @relation(fields: [hostId], references: [id])
 }
+
+model Call {
+  id         String   @id @default(cuid())
+  callerId   String
+  receiverId String
+  type       String   // "audio" | "video"
+  status     String   // "ringing" | "completed" | "missed" | "rejected" | "cancelled"
+  startedAt  DateTime?
+  endedAt    DateTime?
+  duration   Int?     // in seconds
+  createdAt  DateTime @default(now())
+
+  caller   User @relation("CallCaller", fields: [callerId], references: [id])
+  receiver User @relation("CallReceiver", fields: [receiverId], references: [id])
+  histories CallHistory[]
+}
+
+model CallHistory {
+  id        String   @id @default(cuid())
+  callId    String
+  callerId  String
+  receiverId String
+  status    String
+  duration  Int?
+  createdAt DateTime @default(now())
+
+  call Call @relation(fields: [callId], references: [id])
+}

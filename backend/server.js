@@ -32,6 +32,7 @@ require("./src/config/passport");
 
 const authRoutes = require("./src/routes/authRoutes");
 const meetingRoutes = require("./src/routes/meetingRoutes");
+const callRoutes = require("./src/routes/callRoutes");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -79,6 +80,8 @@ app.use("/auth", authRoutes);
 app.use("/meetings", meetingRoutes);
 app.use("/api/meeting", meetingRoutes);
 app.use("/api/meetings", meetingRoutes);
+app.use("/calls", callRoutes);
+app.use("/api/calls", callRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend running");

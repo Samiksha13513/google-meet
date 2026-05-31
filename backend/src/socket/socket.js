@@ -12,6 +12,27 @@ const prisma = require("../config/prisma");
  * }
  */
 const rooms = new Map();
+// userId -> Set<socketId>
+const userSockets = new Map();
+
+function addSocketForUser(userId, socketId) {
+  if (!userId) return;
+  const set = userSockets.get(userId) || new Set();
+  set.add(socketId);
+  userSockets.set(userId, set);
+}
+
+function removeSocketForUser(userId, socketId) {
+  if (!userId) return;
+  const set = userSockets.get(userId);
+  if (!set) return;
+  set.delete(socketId);
+  if (set.size === 0) userSockets.delete(userId);
+}
+
+function getSocketsForUser(userId) {
+  return Array.from(userSockets.get(userId) || []);
+}
 
 function resolveIdentityLabel({ displayName, email }) {
   return (
@@ -110,6 +131,21 @@ function setupSocket(server) {
 
   io.on("connection", (socket) => {
     console.log(new Date().toISOString(), "Socket connected:", socket.id);
+    // Attach auth token (if provided) to socket for presence/calls
+    socket.on("identify", async ({ token }) => {
+      if (!token) return;
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          socket.userId = decoded.id;
+          addSocketForUser(decoded.id, socket.id);
+          // broadcast online presence
+          io.emit("user-online", { userId: decoded.id });
+        }
+      } catch (err) {
+        // ignore invalid token
+      }
+    });
 
     // Dynamic join request / direct enter if first
     socket.on("join-request", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
@@ -338,6 +374,53 @@ function setupSocket(server) {
       });
     });
 
+    // ------------------- Calls: basic signaling & notifications -------------------
+    // Emit to receiver sockets that an incoming call exists
+    socket.on("call-user", async ({ callId, toUserId, type, metadata }) => {
+      if (!toUserId || !callId) return;
+      try {
+        const targets = getSocketsForUser(toUserId);
+        targets.forEach((sId) => {
+          io.to(sId).emit("incoming-call", {
+            callId,
+            fromSocketId: socket.id,
+            fromUserId: socket.userId || null,
+            type,
+            metadata,
+          });
+        });
+      } catch (err) {
+        console.error("call-user error:", err);
+      }
+    });
+
+    socket.on("call-accepted", ({ callId, toSocketId }) => {
+      if (!callId || !toSocketId) return;
+      io.to(toSocketId).emit("call-accepted", { callId, fromSocketId: socket.id });
+    });
+
+    socket.on("call-rejected", ({ callId, toSocketId }) => {
+      if (!callId || !toSocketId) return;
+      io.to(toSocketId).emit("call-rejected", { callId, fromSocketId: socket.id });
+    });
+
+    socket.on("call-ended", ({ callId, toSocketId, reason }) => {
+      if (!callId) return;
+      if (toSocketId) io.to(toSocketId).emit("call-ended", { callId, fromSocketId: socket.id, reason });
+      // Also persist via prisma (best-effort)
+      try {
+        (async () => {
+          const call = await prisma.call.findUnique({ where: { id: callId } });
+          if (call) {
+            await prisma.call.update({ where: { id: callId }, data: { status: "completed", endedAt: new Date() } });
+            await prisma.callHistory.create({ data: { callId, callerId: call.callerId, receiverId: call.receiverId, status: "ended", createdAt: new Date() } });
+          }
+        })();
+      } catch (err) {
+        console.warn("call-ended persistence failed:", err.message);
+      }
+    });
+
     // Chat room messaging
     socket.on("send-message", ({ roomId, message, senderName }) => {
       if (!roomId || !message) return;
@@ -398,6 +481,11 @@ function setupSocket(server) {
 
     socket.on("disconnect", () => {
       console.log(new Date().toISOString(), "Socket disconnected:", socket.id);
+      if (socket.userId) {
+        removeSocketForUser(socket.userId, socket.id);
+        // broadcast offline with last seen timestamp
+        io.emit("user-offline", { userId: socket.userId, lastSeen: new Date().toISOString() });
+      }
     });
   });
 }
