@@ -530,10 +530,13 @@ function setupSocket(server) {
     // Real-time emoji reaction syncing
     socket.on("emoji-reaction", ({ roomId, emoji }) => {
       if (!roomId || !emoji) return;
-      const details = rooms.get(roomId)?.details.get(socket.id);
+      const room = rooms.get(roomId);
+      const details = room?.details.get(socket.id);
       io.to(roomId).emit("emoji-reaction", {
         senderId: socket.id,
+        senderUserId: details?.userId || null,
         emoji,
+        timestamp: Date.now(),
         senderName: details?.displayName || resolveIdentityLabel({ socketId: socket.id }),
         senderEmail: details?.email || "",
         senderImage: details?.image || "",
