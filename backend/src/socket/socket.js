@@ -152,7 +152,31 @@ function setupSocket(server) {
     }
 
     // 4. Delete room if completely empty
-    if (room.activeMembers.size === 0 && room.pendingMembers.size === 0) {
+    // 4. Clean up any preview-only details (user opened preview but never requested join)
+    if (room.details.has(socket.id) && !room.activeMembers.has(socket.id) && !room.pendingMembers.has(socket.id)) {
+      const wasHost = room.hostId === socket.id;
+      room.details.delete(socket.id);
+      if (wasHost) {
+        if (room.activeMembers.size > 0) {
+          const newHostId = Array.from(room.activeMembers)[0];
+          room.hostId = newHostId;
+          const details = room.details.get(newHostId);
+          if (details) details.isHost = true;
+          io.to(roomId).emit("host-changed", { hostId: newHostId, hostDetails: details });
+          for (const sid of Array.from(room.details.keys())) {
+            io.to(sid).emit("host-changed", { hostId: newHostId, hostDetails: details });
+          }
+          console.log(`[Socket] Host promoted to ${newHostId} in room ${roomId}`);
+        } else {
+          room.hostId = null;
+          for (const sid of Array.from(room.details.keys())) {
+            io.to(sid).emit("host-changed", { hostId: null, hostDetails: null });
+          }
+        }
+      }
+    }
+
+    if (room.activeMembers.size === 0 && room.pendingMembers.size === 0 && room.details.size === 0) {
       rooms.delete(roomId);
       console.log(`[Socket] Room ${roomId} completely deleted`);
     }
@@ -316,6 +340,134 @@ function setupSocket(server) {
             email: memberDetail.email,
             image: memberDetail.image,
           });
+        }
+      }
+    });
+
+    // Preview open: track users who opened the meeting link (preview lobby)
+    socket.on("preview-open", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
+      const roomId = normalizeRoomId(roomId || rawRoomId);
+      if (!roomId) return;
+
+      if (!rooms.has(roomId)) {
+        rooms.set(roomId, {
+          hostId: null,
+          activeMembers: new Set(),
+          pendingMembers: new Set(),
+          details: new Map(),
+          messages: [],
+        });
+      }
+
+      const room = rooms.get(roomId);
+
+      let email = "";
+      let image = "";
+      let authenticatedUserId = null;
+      let resolvedDisplayName = displayName;
+
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          if (decoded && decoded.id) {
+            const user = await prisma.user.findUnique({ where: { id: decoded.id } });
+            if (user) {
+              authenticatedUserId = user.id;
+              resolvedDisplayName = user.name || user.email || displayName;
+              email = user.email || "";
+              image = user.avatar || user.image || "";
+            }
+          }
+        } catch (err) {
+          // ignore
+        }
+      }
+
+      if (!resolvedDisplayName) resolvedDisplayName = displayName || `Guest ${socket.id.slice(0,6)}`;
+
+      const isFirst = room.hostId === null;
+
+      const memberDetail = {
+        socketId: socket.id,
+        userId: authenticatedUserId,
+        displayName: resolvedDisplayName,
+        email,
+        image,
+        isMicOn: isMicOn !== false,
+        isCameraOn: isCameraOn !== false,
+        isHandRaised: false,
+        isScreenSharing: false,
+        isHost: Boolean(isFirst),
+        isPreview: true,
+      };
+
+      room.details.set(socket.id, memberDetail);
+
+      if (isFirst) {
+        room.hostId = socket.id;
+        console.log(`[Socket] Preview user ${socket.id} became host for room ${roomId}`);
+      }
+
+      // Inform the previewing socket about current room state and whether they are host
+      socket.emit("room-info", {
+        roomId,
+        hasHost: Boolean(room.hostId),
+        isHost: room.hostId === socket.id,
+        activeCount: room.activeMembers.size,
+        pendingCount: room.pendingMembers.size,
+      });
+
+      // Notify all known sockets (active/pending/preview) about host change
+      if (isFirst) {
+        const hostDetails = room.details.get(room.hostId) || null;
+        // Emit to active members via room
+        io.to(roomId).emit("host-changed", { hostId: room.hostId, hostDetails });
+        // Emit to every tracked detail socket individually (covers preview/pending)
+        for (const sid of Array.from(room.details.keys())) {
+          if (sid === room.hostId) continue;
+          io.to(sid).emit("host-changed", { hostId: room.hostId, hostDetails });
+        }
+      }
+    });
+
+    socket.on("get-room-info", ({ roomId: rawRoomId }) => {
+      const roomId = normalizeRoomId(rawRoomId);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      socket.emit("room-info", {
+        roomId,
+        hasHost: Boolean(room && room.hostId),
+        isHost: Boolean(room && room.hostId === socket.id),
+        activeCount: room ? room.activeMembers.size : 0,
+        pendingCount: room ? room.pendingMembers.size : 0,
+      });
+    });
+
+    socket.on("preview-close", ({ roomId: rawRoomId }) => {
+      const roomId = normalizeRoomId(rawRoomId);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      if (!room) return;
+      // Remove preview details
+      if (room.details.has(socket.id)) {
+        const wasHost = room.hostId === socket.id;
+        room.details.delete(socket.id);
+        if (wasHost) {
+          if (room.activeMembers.size > 0) {
+            const newHostId = Array.from(room.activeMembers)[0];
+            room.hostId = newHostId;
+            const details = room.details.get(newHostId);
+            if (details) details.isHost = true;
+            io.to(roomId).emit("host-changed", { hostId: newHostId, hostDetails: details });
+            for (const sid of Array.from(room.details.keys())) {
+              io.to(sid).emit("host-changed", { hostId: newHostId, hostDetails: details });
+            }
+          } else {
+            room.hostId = null;
+            for (const sid of Array.from(room.details.keys())) {
+              io.to(sid).emit("host-changed", { hostId: null, hostDetails: null });
+            }
+          }
         }
       }
     });
@@ -582,6 +734,30 @@ function setupSocket(server) {
         removeSocketForUser(socket.userId, socket.id);
         // broadcast offline with last seen timestamp
         io.emit("user-offline", { userId: socket.userId, lastSeen: new Date().toISOString() });
+      }
+      // Cleanup any preview-only details that might remain (socket left without preview-close)
+      for (const [roomId, room] of rooms.entries()) {
+        if (room.details && room.details.has(socket.id) && !room.activeMembers.has(socket.id) && !room.pendingMembers.has(socket.id)) {
+          const wasHost = room.hostId === socket.id;
+          room.details.delete(socket.id);
+          if (wasHost) {
+            if (room.activeMembers.size > 0) {
+              const newHostId = Array.from(room.activeMembers)[0];
+              room.hostId = newHostId;
+              const details = room.details.get(newHostId);
+              if (details) details.isHost = true;
+              io.to(roomId).emit("host-changed", { hostId: newHostId, hostDetails: details });
+              for (const sid of Array.from(room.details.keys())) {
+                io.to(sid).emit("host-changed", { hostId: newHostId, hostDetails: details });
+              }
+            } else {
+              room.hostId = null;
+              for (const sid of Array.from(room.details.keys())) {
+                io.to(sid).emit("host-changed", { hostId: null, hostDetails: null });
+              }
+            }
+          }
+        }
       }
     });
   });
