@@ -289,6 +289,7 @@ function setupSocket(server) {
 
       room.details.set(socket.id, memberDetail);
 
+      const isAuthenticatedUser = Boolean(authenticatedUserId);
       if (isFirst) {
         // Immediate approval for the host (first person)
         room.activeMembers.add(socket.id);
@@ -303,8 +304,30 @@ function setupSocket(server) {
           chatHistory: room.messages || [],
         });
         void persistApprovedParticipant(roomId, socket.id);
+      } else if (isAuthenticatedUser) {
+        // Authenticated users bypass host approval and join immediately
+        room.activeMembers.add(socket.id);
+        socket.join(roomId);
+
+        const otherActiveMembers = Array.from(room.activeMembers).filter(
+          (id) => id !== socket.id
+        );
+        const membersList = otherActiveMembers
+          .map((id) => room.details.get(id))
+          .filter(Boolean);
+
+        socket.emit("join-approved", {
+          isHost: false,
+          roomId,
+          members: membersList,
+          chatHistory: room.messages || [],
+        });
+
+        io.to(roomId).emit("participant-joined", memberDetail);
+        console.log(`[Socket] Authenticated user ${socket.id} joined room ${roomId}`);
+        void persistApprovedParticipant(roomId, socket.id);
       } else {
-        // Waiting room flow for all subsequent participants
+        // Waiting room flow for guest participants
         room.pendingMembers.add(socket.id);
         socket.emit("waiting-room", { roomId });
 
