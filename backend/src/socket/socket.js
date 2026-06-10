@@ -423,6 +423,40 @@ function setupSocket(server) {
       }
     });
 
+    // Hand raise updates
+    socket.on("raise-hand", ({ roomId, isHandRaised }) => {
+      const room = rooms.get(roomId);
+      if (!room || !room.details.has(socket.id)) return;
+
+      const details = room.details.get(socket.id);
+      details.isHandRaised = Boolean(isHandRaised);
+
+      socket.broadcast.to(roomId).emit("raise-hand-changed", {
+        senderId: socket.id,
+        isHandRaised: details.isHandRaised,
+      });
+    });
+
+    // Host ends meeting for all participants
+    socket.on("end-meeting-for-all", ({ roomId }) => {
+      const room = rooms.get(roomId);
+      if (!room || room.hostId !== socket.id) return;
+
+      io.to(roomId).emit("meeting-ended", {
+        reason: "Host ended the meeting",
+      });
+
+      for (const memberId of [...room.activeMembers]) {
+        const memberSocket = io.sockets.sockets.get(memberId);
+        if (memberSocket) {
+          memberSocket.leave(roomId);
+        }
+      }
+
+      rooms.delete(roomId);
+      console.log(`[Socket] Host ${socket.id} ended meeting for all in room ${roomId}`);
+    });
+
     // User mic/camera status updates
     socket.on("status-update", ({ roomId, isMicOn, isCameraOn }) => {
       const room = rooms.get(roomId);
