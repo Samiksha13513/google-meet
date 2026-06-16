@@ -187,6 +187,44 @@ function setupSocket(server) {
     }
   }
 
+  function findActiveSocketForUser(room, userId, exceptSocketId) {
+    if (!userId) return null;
+    return Array.from(room.activeMembers).find((memberSocketId) => {
+      if (memberSocketId === exceptSocketId) return false;
+      return room.details.get(memberSocketId)?.userId === userId;
+    }) || null;
+  }
+
+  function removeSwitchedSession(socketToRemove, roomId) {
+    const room = rooms.get(roomId);
+    if (!room || !socketToRemove || !room.activeMembers.has(socketToRemove.id)) return null;
+
+    const details = room.details.get(socketToRemove.id);
+    if (details?.participantRecordId) {
+      prisma.meetingParticipant
+        .update({
+          where: { id: details.participantRecordId },
+          data: { leftAt: new Date() },
+        })
+        .catch((err) =>
+          console.warn("[Socket] participant switch persistence failed:", err.message)
+        );
+    }
+
+    if (details?.isScreenSharing) {
+      socketToRemove.broadcast.to(roomId).emit("screen-share-stopped", {
+        senderId: socketToRemove.id,
+      });
+    }
+
+    room.activeMembers.delete(socketToRemove.id);
+    room.details.delete(socketToRemove.id);
+    socketToRemove.leave(roomId);
+    socketToRemove.emit("force-switched", { roomId });
+
+    return details;
+  }
+
   io.on("connection", (socket) => {
     console.log(new Date().toISOString(), "Socket connected:", socket.id);
     // Attach auth token (if provided) to socket for presence/calls
@@ -237,12 +275,6 @@ function setupSocket(server) {
         return;
       }
 
-      // Limit room size to 10 participants
-      if (room.activeMembers.size >= 10) {
-        socket.emit("join-denied", { reason: "Meeting is full" });
-        return;
-      }
-
       let email = "";
       let image = "";
       let authenticatedUserId = null;
@@ -287,6 +319,18 @@ function setupSocket(server) {
         isScreenSharing: false,
         isHost: isMeetingCreator,
       };
+
+      const existingActiveSocketId = findActiveSocketForUser(room, authenticatedUserId, socket.id);
+      if (existingActiveSocketId) {
+        socket.emit("already-in-meeting", { roomId });
+        return;
+      }
+
+      // Limit room size to 10 participants
+      if (room.activeMembers.size >= 10) {
+        socket.emit("join-denied", { reason: "Meeting is full" });
+        return;
+      }
 
       room.details.set(socket.id, memberDetail);
 
@@ -334,6 +378,108 @@ function setupSocket(server) {
             displayName: memberDetail.displayName,
             email: memberDetail.email,
             image: memberDetail.image,
+          });
+        }
+      }
+    });
+
+    socket.on("switch-here", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
+      const roomId = normalizeRoomId(rawRoomId);
+      if (!roomId) return;
+
+      const room = rooms.get(roomId);
+      if (!room) return;
+
+      const meeting = await prisma.meeting.findUnique({
+        where: { meetingCode: roomId },
+        select: { hostId: true, expiresAt: true },
+      });
+
+      if (!meeting || meeting.expiresAt < new Date()) return;
+
+      let email = "";
+      let image = "";
+      let authenticatedUserId = null;
+      let resolvedDisplayName = displayName;
+
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          if (decoded && decoded.id) {
+            const user = await prisma.user.findUnique({
+              where: { id: decoded.id }
+            });
+            if (user) {
+              authenticatedUserId = user.id;
+              resolvedDisplayName = user.name || user.email || displayName;
+              email = user.email || "";
+              image = user.avatar || user.image || "";
+            }
+          }
+        } catch (err) {
+          console.error("[Socket] switch token verification failed:", err.message);
+        }
+      }
+
+      const existingActiveSocketId = findActiveSocketForUser(room, authenticatedUserId, socket.id);
+      if (!existingActiveSocketId) {
+        socket.emit("join-denied", { reason: "The other session is no longer active" });
+        return;
+      }
+
+      const existingSocket = io.sockets.sockets.get(existingActiveSocketId);
+      const previousDetails = removeSwitchedSession(existingSocket, roomId);
+      if (!previousDetails) return;
+
+      const isHostAfterSwitch = Boolean(
+        previousDetails.isHost || (authenticatedUserId && authenticatedUserId === meeting.hostId)
+      );
+      const memberDetail = {
+        socketId: socket.id,
+        userId: authenticatedUserId,
+        displayName: resolvedDisplayName || previousDetails.displayName || "Guest",
+        email,
+        image,
+        isMicOn: isMicOn !== false,
+        isCameraOn: isCameraOn !== false,
+        isHandRaised: previousDetails.isHandRaised || false,
+        isScreenSharing: false,
+        isHost: isHostAfterSwitch,
+      };
+
+      room.pendingMembers.delete(socket.id);
+      room.details.set(socket.id, memberDetail);
+      room.activeMembers.add(socket.id);
+      if (isHostAfterSwitch) {
+        room.hostId = socket.id;
+      }
+      socket.join(roomId);
+
+      const membersList = Array.from(room.activeMembers)
+        .filter((id) => id !== socket.id)
+        .map((id) => room.details.get(id))
+        .filter(Boolean);
+
+      socket.emit("join-approved", {
+        isHost: isHostAfterSwitch,
+        roomId,
+        members: membersList,
+        chatHistory: room.messages || [],
+      });
+      socket.broadcast.to(roomId).emit("participant-switched", {
+        previousSocketId: existingActiveSocketId,
+        member: memberDetail,
+      });
+      void persistApprovedParticipant(roomId, socket.id);
+      if (isHostAfterSwitch) {
+        for (const pendingSocketId of room.pendingMembers) {
+          const pendingDetails = room.details.get(pendingSocketId);
+          if (!pendingDetails) continue;
+          io.to(socket.id).emit("join-request", {
+            socketId: pendingSocketId,
+            displayName: pendingDetails.displayName,
+            email: pendingDetails.email,
+            image: pendingDetails.image,
           });
         }
       }
