@@ -131,23 +131,9 @@ function setupSocket(server) {
       io.to(roomId).emit("participant-left", { socketId: socket.id });
       console.log(`[Socket] User ${socket.id} left active room ${roomId}`);
 
-      // 3. Host Promotion/Re-assignment
+      // 3. Host leaves; host authority returns only when the meeting creator rejoins.
       if (room.hostId === socket.id) {
-        if (room.activeMembers.size > 0) {
-          const newHostId = Array.from(room.activeMembers)[0];
-          room.hostId = newHostId;
-          const details = room.details.get(newHostId);
-          if (details) {
-            details.isHost = true;
-          }
-          io.to(roomId).emit("host-changed", {
-            hostId: newHostId,
-            hostDetails: details,
-          });
-          console.log(`[Socket] Host promoted to ${newHostId} in room ${roomId}`);
-        } else {
-          room.hostId = null;
-        }
+        room.hostId = null;
       }
     }
 
@@ -219,7 +205,7 @@ function setupSocket(server) {
       }
     });
 
-    // Dynamic join request / direct enter if first
+    // Dynamic join request / waiting room admission
     socket.on("join-request", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
       const roomId = normalizeRoomId(rawRoomId);
       if (!roomId) return;
@@ -235,6 +221,21 @@ function setupSocket(server) {
       }
 
       const room = rooms.get(roomId);
+
+      const meeting = await prisma.meeting.findUnique({
+        where: { meetingCode: roomId },
+        select: { hostId: true, expiresAt: true },
+      });
+
+      if (!meeting) {
+        socket.emit("join-denied", { reason: "Meeting not found" });
+        return;
+      }
+
+      if (meeting.expiresAt < new Date()) {
+        socket.emit("join-denied", { reason: "Meeting has expired" });
+        return;
+      }
 
       // Limit room size to 10 participants
       if (room.activeMembers.size >= 10) {
@@ -273,7 +274,7 @@ function setupSocket(server) {
         resolvedDisplayName = displayName || `Guest ${socket.id.slice(0, 6)}`;
       }
 
-      const isFirst = room.activeMembers.size === 0;
+      const isMeetingCreator = Boolean(authenticatedUserId && authenticatedUserId === meeting.hostId);
       const memberDetail = {
         socketId: socket.id,
         userId: authenticatedUserId,
@@ -284,29 +285,15 @@ function setupSocket(server) {
         isCameraOn: isCameraOn !== false,
         isHandRaised: false,
         isScreenSharing: false,
-        isHost: isFirst,
+        isHost: isMeetingCreator,
       };
 
       room.details.set(socket.id, memberDetail);
 
-      const isAuthenticatedUser = Boolean(authenticatedUserId);
-      if (isFirst) {
-        // Immediate approval for the host (first person)
+      if (isMeetingCreator) {
+        // Immediate approval only for the persisted meeting creator.
         room.activeMembers.add(socket.id);
         room.hostId = socket.id;
-        socket.join(roomId);
-
-        console.log(`[Socket] Room ${roomId} created. Host: ${socket.id}`);
-        socket.emit("join-approved", {
-          isHost: true,
-          roomId,
-          members: [],
-          chatHistory: room.messages || [],
-        });
-        void persistApprovedParticipant(roomId, socket.id);
-      } else if (isAuthenticatedUser) {
-        // Authenticated users bypass host approval and join immediately
-        room.activeMembers.add(socket.id);
         socket.join(roomId);
 
         const otherActiveMembers = Array.from(room.activeMembers).filter(
@@ -316,18 +303,27 @@ function setupSocket(server) {
           .map((id) => room.details.get(id))
           .filter(Boolean);
 
+        console.log(`[Socket] Meeting creator joined room ${roomId}. Host: ${socket.id}`);
         socket.emit("join-approved", {
-          isHost: false,
+          isHost: true,
           roomId,
           members: membersList,
           chatHistory: room.messages || [],
         });
-
-        io.to(roomId).emit("participant-joined", memberDetail);
-        console.log(`[Socket] Authenticated user ${socket.id} joined room ${roomId}`);
+        socket.broadcast.to(roomId).emit("participant-joined", memberDetail);
         void persistApprovedParticipant(roomId, socket.id);
+        for (const pendingSocketId of room.pendingMembers) {
+          const pendingDetails = room.details.get(pendingSocketId);
+          if (!pendingDetails) continue;
+          io.to(socket.id).emit("join-request", {
+            socketId: pendingSocketId,
+            displayName: pendingDetails.displayName,
+            email: pendingDetails.email,
+            image: pendingDetails.image,
+          });
+        }
       } else {
-        // Waiting room flow for guest participants
+        // Waiting room flow for every non-host participant.
         room.pendingMembers.add(socket.id);
         socket.emit("waiting-room", { roomId });
 
