@@ -8,10 +8,14 @@ const prisma = require("../config/prisma");
  *   hostId: string | null,
  *   activeMembers: Set<socketId>,
  *   pendingMembers: Set<socketId>,
+ *   admittedUserIds: Set<userId>,
+ *   admittedClientIds: Set<clientId>,
+ *   disconnectTimers: Map<socketId, Timeout>,
  *   details: Map<socketId, { socketId, displayName, isMicOn, isCameraOn, isScreenSharing, isHost }>
  * }
  */
 const rooms = new Map();
+const endedMeetings = new Set();
 // userId -> Set<socketId>
 const userSockets = new Map();
 
@@ -45,6 +49,19 @@ function resolveIdentityLabel({ displayName, email }) {
 function normalizeRoomId(payload) {
   if (typeof payload === "string") return payload.trim();
   return payload?.roomId || payload?.meetingCode || null;
+}
+
+function createRoomState() {
+  return {
+    hostId: null,
+    activeMembers: new Set(),
+    pendingMembers: new Set(),
+    admittedUserIds: new Set(),
+    admittedClientIds: new Set(),
+    disconnectTimers: new Map(),
+    details: new Map(),
+    messages: [],
+  };
 }
 
 async function touchRecentContact(userId, contactUserId, at = new Date()) {
@@ -94,6 +111,15 @@ function setupSocket(server) {
   function handleUserLeaving(socket, roomId) {
     const room = rooms.get(roomId);
     if (!room) return;
+    if (socket.meetingRoomId === roomId) {
+      socket.meetingRoomId = null;
+    }
+
+    const disconnectTimer = room.disconnectTimers.get(socket.id);
+    if (disconnectTimer) {
+      clearTimeout(disconnectTimer);
+      room.disconnectTimers.delete(socket.id);
+    }
 
     // 1. Clean up pending user
     if (room.pendingMembers.has(socket.id)) {
@@ -142,6 +168,23 @@ function setupSocket(server) {
       rooms.delete(roomId);
       console.log(`[Socket] Room ${roomId} completely deleted`);
     }
+  }
+
+  function scheduleDisconnectCleanup(socket, roomId) {
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    if (!room.activeMembers.has(socket.id) && !room.pendingMembers.has(socket.id)) return;
+    if (room.disconnectTimers.has(socket.id)) return;
+
+    const timer = setTimeout(() => {
+      const currentRoom = rooms.get(roomId);
+      if (!currentRoom) return;
+      currentRoom.disconnectTimers.delete(socket.id);
+      handleUserLeaving(socket, roomId);
+    }, 10_000);
+
+    room.disconnectTimers.set(socket.id, timer);
   }
 
   async function persistApprovedParticipant(roomId, socketId) {
@@ -195,6 +238,80 @@ function setupSocket(server) {
     }) || null;
   }
 
+  function findPendingSocketForUser(room, userId, exceptSocketId) {
+    if (!userId) return null;
+    return Array.from(room.pendingMembers).find((memberSocketId) => {
+      if (memberSocketId === exceptSocketId) return false;
+      return room.details.get(memberSocketId)?.userId === userId;
+    }) || null;
+  }
+
+  function findActiveSocketForClient(room, clientId, exceptSocketId) {
+    if (!clientId) return null;
+    return Array.from(room.activeMembers).find((memberSocketId) => {
+      if (memberSocketId === exceptSocketId) return false;
+      return room.details.get(memberSocketId)?.clientId === clientId;
+    }) || null;
+  }
+
+  function findPendingSocketForClient(room, clientId, exceptSocketId) {
+    if (!clientId) return null;
+    return Array.from(room.pendingMembers).find((memberSocketId) => {
+      if (memberSocketId === exceptSocketId) return false;
+      return room.details.get(memberSocketId)?.clientId === clientId;
+    }) || null;
+  }
+
+  function isSocketConnected(socketId) {
+    return Boolean(io.sockets.sockets.get(socketId)?.connected);
+  }
+
+  function removeDisconnectedSession(socketId, roomId) {
+    const room = rooms.get(roomId);
+    if (!room || !room.activeMembers.has(socketId) || isSocketConnected(socketId)) return null;
+
+    const disconnectTimer = room.disconnectTimers.get(socketId);
+    if (disconnectTimer) {
+      clearTimeout(disconnectTimer);
+      room.disconnectTimers.delete(socketId);
+    }
+
+    const details = room.details.get(socketId);
+    if (details?.isScreenSharing) {
+      io.to(roomId).emit("screen-share-stopped", {
+        senderId: socketId,
+      });
+    }
+
+    room.activeMembers.delete(socketId);
+    room.details.delete(socketId);
+    if (room.hostId === socketId) {
+      room.hostId = null;
+    }
+
+    return details;
+  }
+
+  function removeDisconnectedPendingSession(socketId, roomId) {
+    const room = rooms.get(roomId);
+    if (!room || !room.pendingMembers.has(socketId) || isSocketConnected(socketId)) return null;
+
+    const disconnectTimer = room.disconnectTimers.get(socketId);
+    if (disconnectTimer) {
+      clearTimeout(disconnectTimer);
+      room.disconnectTimers.delete(socketId);
+    }
+
+    const details = room.details.get(socketId);
+    room.pendingMembers.delete(socketId);
+    room.details.delete(socketId);
+    if (room.hostId) {
+      io.to(room.hostId).emit("join-request-cancelled", { socketId });
+    }
+
+    return details;
+  }
+
   function removeSwitchedSession(socketToRemove, roomId) {
     const room = rooms.get(roomId);
     if (!room || !socketToRemove || !room.activeMembers.has(socketToRemove.id)) return null;
@@ -244,18 +361,20 @@ function setupSocket(server) {
     });
 
     // Dynamic join request / waiting room admission
-    socket.on("join-request", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
+    socket.on("join-request", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn, clientId }) => {
       const roomId = normalizeRoomId(rawRoomId);
       if (!roomId) return;
+      socket.meetingRoomId = roomId;
+
+      if (endedMeetings.has(roomId)) {
+        socket.emit("meeting-ended", {
+          reason: "Host ended the meeting",
+        });
+        return;
+      }
 
       if (!rooms.has(roomId)) {
-        rooms.set(roomId, {
-          hostId: null,
-          activeMembers: new Set(),
-          pendingMembers: new Set(),
-          details: new Map(),
-          messages: [],
-        });
+        rooms.set(roomId, createRoomState());
       }
 
       const room = rooms.get(roomId);
@@ -310,6 +429,7 @@ function setupSocket(server) {
       const memberDetail = {
         socketId: socket.id,
         userId: authenticatedUserId,
+        clientId: clientId || null,
         displayName: resolvedDisplayName,
         email,
         image,
@@ -321,9 +441,44 @@ function setupSocket(server) {
       };
 
       const existingActiveSocketId = findActiveSocketForUser(room, authenticatedUserId, socket.id);
+      let replacedSocketId = null;
       if (existingActiveSocketId) {
-        socket.emit("already-in-meeting", { roomId });
-        return;
+        if (isSocketConnected(existingActiveSocketId)) {
+          socket.emit("already-in-meeting", { roomId });
+          return;
+        }
+        if (removeDisconnectedSession(existingActiveSocketId, roomId)) {
+          replacedSocketId = existingActiveSocketId;
+        }
+      }
+
+      const existingActiveClientSocketId = findActiveSocketForClient(room, clientId, socket.id);
+      if (!existingActiveSocketId && existingActiveClientSocketId) {
+        if (isSocketConnected(existingActiveClientSocketId)) {
+          socket.emit("already-in-meeting", { roomId });
+          return;
+        }
+        if (removeDisconnectedSession(existingActiveClientSocketId, roomId)) {
+          replacedSocketId = existingActiveClientSocketId;
+        }
+      }
+
+      const existingPendingSocketId = findPendingSocketForUser(room, authenticatedUserId, socket.id);
+      if (existingPendingSocketId) {
+        if (isSocketConnected(existingPendingSocketId)) {
+          socket.emit("already-in-meeting", { roomId });
+          return;
+        }
+        removeDisconnectedPendingSession(existingPendingSocketId, roomId);
+      }
+
+      const existingPendingClientSocketId = findPendingSocketForClient(room, clientId, socket.id);
+      if (!existingPendingSocketId && existingPendingClientSocketId) {
+        if (isSocketConnected(existingPendingClientSocketId)) {
+          socket.emit("already-in-meeting", { roomId });
+          return;
+        }
+        removeDisconnectedPendingSession(existingPendingClientSocketId, roomId);
       }
 
       // Limit room size to 10 participants
@@ -334,10 +489,22 @@ function setupSocket(server) {
 
       room.details.set(socket.id, memberDetail);
 
-      if (isMeetingCreator) {
+      if (
+        isMeetingCreator ||
+        (authenticatedUserId && room.admittedUserIds.has(authenticatedUserId)) ||
+        (clientId && room.admittedClientIds.has(clientId))
+      ) {
         // Immediate approval only for the persisted meeting creator.
         room.activeMembers.add(socket.id);
-        room.hostId = socket.id;
+        if (isMeetingCreator) {
+          room.hostId = socket.id;
+        }
+        if (authenticatedUserId) {
+          room.admittedUserIds.add(authenticatedUserId);
+        }
+        if (clientId) {
+          room.admittedClientIds.add(clientId);
+        }
         socket.join(roomId);
 
         const otherActiveMembers = Array.from(room.activeMembers).filter(
@@ -347,24 +514,33 @@ function setupSocket(server) {
           .map((id) => room.details.get(id))
           .filter(Boolean);
 
-        console.log(`[Socket] Meeting creator joined room ${roomId}. Host: ${socket.id}`);
+        console.log(`[Socket] ${isMeetingCreator ? "Meeting creator" : "Admitted participant"} joined room ${roomId}. Socket: ${socket.id}`);
         socket.emit("join-approved", {
-          isHost: true,
+          isHost: isMeetingCreator,
           roomId,
           members: membersList,
           chatHistory: room.messages || [],
         });
-        socket.broadcast.to(roomId).emit("participant-joined", memberDetail);
-        void persistApprovedParticipant(roomId, socket.id);
-        for (const pendingSocketId of room.pendingMembers) {
-          const pendingDetails = room.details.get(pendingSocketId);
-          if (!pendingDetails) continue;
-          io.to(socket.id).emit("join-request", {
-            socketId: pendingSocketId,
-            displayName: pendingDetails.displayName,
-            email: pendingDetails.email,
-            image: pendingDetails.image,
+        if (replacedSocketId) {
+          socket.broadcast.to(roomId).emit("participant-switched", {
+            previousSocketId: replacedSocketId,
+            member: memberDetail,
           });
+        } else {
+          socket.broadcast.to(roomId).emit("participant-joined", memberDetail);
+        }
+        void persistApprovedParticipant(roomId, socket.id);
+        if (isMeetingCreator) {
+          for (const pendingSocketId of room.pendingMembers) {
+            const pendingDetails = room.details.get(pendingSocketId);
+            if (!pendingDetails) continue;
+            io.to(socket.id).emit("join-request", {
+              socketId: pendingSocketId,
+              displayName: pendingDetails.displayName,
+              email: pendingDetails.email,
+              image: pendingDetails.image,
+            });
+          }
         }
       } else {
         // Waiting room flow for every non-host participant.
@@ -383,12 +559,20 @@ function setupSocket(server) {
       }
     });
 
-    socket.on("switch-here", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn }) => {
+    socket.on("switch-here", async ({ roomId: rawRoomId, token, displayName, isMicOn, isCameraOn, clientId }) => {
       const roomId = normalizeRoomId(rawRoomId);
       if (!roomId) return;
+      socket.meetingRoomId = roomId;
 
       const room = rooms.get(roomId);
       if (!room) return;
+
+      if (endedMeetings.has(roomId)) {
+        socket.emit("meeting-ended", {
+          reason: "Host ended the meeting",
+        });
+        return;
+      }
 
       const meeting = await prisma.meeting.findUnique({
         where: { meetingCode: roomId },
@@ -421,7 +605,9 @@ function setupSocket(server) {
         }
       }
 
-      const existingActiveSocketId = findActiveSocketForUser(room, authenticatedUserId, socket.id);
+      const existingActiveSocketId =
+        findActiveSocketForUser(room, authenticatedUserId, socket.id) ||
+        findActiveSocketForClient(room, clientId, socket.id);
       if (!existingActiveSocketId) {
         socket.emit("join-denied", { reason: "The other session is no longer active" });
         return;
@@ -437,6 +623,7 @@ function setupSocket(server) {
       const memberDetail = {
         socketId: socket.id,
         userId: authenticatedUserId,
+        clientId: clientId || previousDetails.clientId || null,
         displayName: resolvedDisplayName || previousDetails.displayName || "Guest",
         email,
         image,
@@ -499,6 +686,12 @@ function setupSocket(server) {
         const details = room.details.get(socketId);
         if (!details) return;
         details.isHost = false;
+        if (details.userId) {
+          room.admittedUserIds.add(details.userId);
+        }
+        if (details.clientId) {
+          room.admittedClientIds.add(details.clientId);
+        }
 
         // Fetch other active members details to supply to approved user
         const otherActiveMembers = Array.from(room.activeMembers).filter(
@@ -551,6 +744,13 @@ function setupSocket(server) {
       if (!room || room.hostId !== socket.id) return;
 
       if (room.activeMembers.has(socketId)) {
+        const details = room.details.get(socketId);
+        if (details?.userId) {
+          room.admittedUserIds.delete(details.userId);
+        }
+        if (details?.clientId) {
+          room.admittedClientIds.delete(details.clientId);
+        }
         room.activeMembers.delete(socketId);
         room.details.delete(socketId);
 
@@ -592,9 +792,26 @@ function setupSocket(server) {
         const memberSocket = io.sockets.sockets.get(memberId);
         if (memberSocket) {
           memberSocket.leave(roomId);
+          memberSocket.meetingRoomId = null;
         }
       }
 
+      for (const memberId of [...room.pendingMembers]) {
+        const memberSocket = io.sockets.sockets.get(memberId);
+        if (memberSocket) {
+          memberSocket.emit("meeting-ended", {
+            reason: "Host ended the meeting",
+          });
+          memberSocket.leave(roomId);
+          memberSocket.meetingRoomId = null;
+        }
+      }
+
+      for (const timer of room.disconnectTimers.values()) {
+        clearTimeout(timer);
+      }
+
+      endedMeetings.add(roomId);
       rooms.delete(roomId);
       console.log(`[Socket] Host ${socket.id} ended meeting for all in room ${roomId}`);
     });
@@ -773,7 +990,10 @@ function setupSocket(server) {
     socket.on("disconnecting", () => {
       for (const roomId of socket.rooms) {
         if (roomId === socket.id) continue;
-        handleUserLeaving(socket, roomId);
+        scheduleDisconnectCleanup(socket, roomId);
+      }
+      if (socket.meetingRoomId) {
+        scheduleDisconnectCleanup(socket, socket.meetingRoomId);
       }
     });
 
