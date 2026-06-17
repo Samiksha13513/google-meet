@@ -2,6 +2,10 @@ const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
 
+const WAITING_LOBBY_TIMEOUT_MS = Number(process.env.WAITING_LOBBY_TIMEOUT_MS || 15 * 60 * 1000);
+const MAX_MEETING_DURATION_MS = Number(process.env.MAX_MEETING_DURATION_MS || 24 * 60 * 60 * 1000);
+const MEETING_END_WARNING_MS = Number(process.env.MEETING_END_WARNING_MS || 5 * 60 * 1000);
+
 /**
  * Room Data Store (In-Memory)
  * roomId -> {
@@ -11,7 +15,10 @@ const prisma = require("../config/prisma");
  *   admittedUserIds: Set<userId>,
  *   admittedClientIds: Set<clientId>,
  *   disconnectTimers: Map<socketId, Timeout>,
+ *   pendingTimers: Map<socketId, Timeout>,
  *   details: Map<socketId, { socketId, displayName, isMicOn, isCameraOn, isScreenSharing, isHost }>
+ *   activeScreenSharerId: string | null,
+ *   activityIds: Set<string>
  * }
  */
 const rooms = new Map();
@@ -59,6 +66,13 @@ function createRoomState() {
     admittedUserIds: new Set(),
     admittedClientIds: new Set(),
     disconnectTimers: new Map(),
+    pendingTimers: new Map(),
+    createdAt: Date.now(),
+    endsAt: null,
+    warningTimer: null,
+    endTimer: null,
+    activeScreenSharerId: null,
+    activityIds: new Set(),
     details: new Map(),
     messages: [],
   };
@@ -108,6 +122,146 @@ function setupSocket(server) {
     },
   });
 
+  function clearPendingTimer(room, socketId) {
+    const timer = room?.pendingTimers?.get(socketId);
+    if (!timer) return;
+    clearTimeout(timer);
+    room.pendingTimers.delete(socketId);
+  }
+
+  function clearRoomTimers(room) {
+    for (const timer of room.disconnectTimers.values()) {
+      clearTimeout(timer);
+    }
+    for (const timer of room.pendingTimers.values()) {
+      clearTimeout(timer);
+    }
+    if (room.warningTimer) {
+      clearTimeout(room.warningTimer);
+      room.warningTimer = null;
+    }
+    if (room.endTimer) {
+      clearTimeout(room.endTimer);
+      room.endTimer = null;
+    }
+    room.disconnectTimers.clear();
+    room.pendingTimers.clear();
+  }
+
+  function endMeetingForRoom(roomId, reason) {
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    io.to(roomId).emit("meeting-ended", { reason });
+
+    for (const memberId of [...room.activeMembers]) {
+      const memberSocket = io.sockets.sockets.get(memberId);
+      if (memberSocket) {
+        memberSocket.leave(roomId);
+        memberSocket.meetingRoomId = null;
+      }
+    }
+
+    for (const memberId of [...room.pendingMembers]) {
+      const memberSocket = io.sockets.sockets.get(memberId);
+      if (memberSocket) {
+        memberSocket.emit("meeting-ended", { reason });
+        memberSocket.leave(roomId);
+        memberSocket.meetingRoomId = null;
+      }
+    }
+
+    clearRoomTimers(room);
+    endedMeetings.add(roomId);
+    rooms.delete(roomId);
+  }
+
+  function emitActivity(roomId, type, socketId, text) {
+    const room = rooms.get(roomId);
+    if (!room || !socketId || !text) return;
+
+    const id = `${type}:${socketId}:${Date.now()}`;
+    if (room.activityIds.has(id)) return;
+    room.activityIds.add(id);
+    if (room.activityIds.size > 300) {
+      room.activityIds = new Set(Array.from(room.activityIds).slice(-200));
+    }
+
+    io.to(roomId).emit("meeting-activity", {
+      id,
+      type,
+      socketId,
+      message: text,
+      timestamp: Date.now(),
+    });
+  }
+
+  function getParticipantName(details) {
+    return details?.displayName || details?.email || "User";
+  }
+
+  function scheduleMeetingDurationLimit(roomId) {
+    const room = rooms.get(roomId);
+    if (!room || room.endTimer || MAX_MEETING_DURATION_MS <= 0) return;
+
+    room.endsAt = room.createdAt + MAX_MEETING_DURATION_MS;
+    const remainingMs = Math.max(0, room.endsAt - Date.now());
+    const warningDelay = remainingMs - Math.max(0, MEETING_END_WARNING_MS);
+
+    if (warningDelay <= 0) {
+      io.to(roomId).emit("meeting-ending-soon", {
+        reason: "Meeting duration limit reached",
+        endsAt: room.endsAt,
+        remainingMs,
+      });
+    } else {
+      room.warningTimer = setTimeout(() => {
+        io.to(roomId).emit("meeting-ending-soon", {
+          reason: "Meeting duration limit reached",
+          endsAt: room.endsAt,
+          remainingMs: Math.max(0, room.endsAt - Date.now()),
+        });
+      }, warningDelay);
+    }
+
+    room.endTimer = setTimeout(() => {
+      endMeetingForRoom(roomId, "Meeting duration limit reached");
+      console.log(`[Socket] Meeting ${roomId} ended after reaching max duration`);
+    }, remainingMs);
+  }
+
+  function scheduleWaitingLobbyTimeout(roomId, socketId) {
+    const room = rooms.get(roomId);
+    if (!room || WAITING_LOBBY_TIMEOUT_MS <= 0 || room.pendingTimers.has(socketId)) return;
+
+    const timer = setTimeout(() => {
+      const currentRoom = rooms.get(roomId);
+      if (!currentRoom || !currentRoom.pendingMembers.has(socketId)) return;
+
+      currentRoom.pendingTimers.delete(socketId);
+      currentRoom.pendingMembers.delete(socketId);
+      currentRoom.details.delete(socketId);
+
+      const pendingSocket = io.sockets.sockets.get(socketId);
+      if (pendingSocket) {
+        pendingSocket.meetingRoomId = null;
+        pendingSocket.emit("join-denied", {
+          reason: "Request timed out. Please join again.",
+        });
+      }
+      if (currentRoom.hostId) {
+        io.to(currentRoom.hostId).emit("join-request-cancelled", { socketId });
+      }
+      if (currentRoom.activeMembers.size === 0 && currentRoom.pendingMembers.size === 0) {
+        clearRoomTimers(currentRoom);
+        rooms.delete(roomId);
+      }
+      console.log(`[Socket] Waiting room request timed out for ${socketId} in room ${roomId}`);
+    }, WAITING_LOBBY_TIMEOUT_MS);
+
+    room.pendingTimers.set(socketId, timer);
+  }
+
   function handleUserLeaving(socket, roomId) {
     const room = rooms.get(roomId);
     if (!room) return;
@@ -124,6 +278,7 @@ function setupSocket(server) {
     // 1. Clean up pending user
     if (room.pendingMembers.has(socket.id)) {
       room.pendingMembers.delete(socket.id);
+      clearPendingTimer(room, socket.id);
       room.details.delete(socket.id);
       if (room.hostId) {
         io.to(room.hostId).emit("join-request-cancelled", { socketId: socket.id });
@@ -145,9 +300,17 @@ function setupSocket(server) {
           );
       }
       if (leavingDetails?.isScreenSharing) {
+        room.activeScreenSharerId =
+          room.activeScreenSharerId === socket.id ? null : room.activeScreenSharerId;
         socket.broadcast.to(roomId).emit("screen-share-stopped", {
           senderId: socket.id,
         });
+        emitActivity(
+          roomId,
+          "screen-share-stopped",
+          socket.id,
+          `${getParticipantName(leavingDetails)} stopped presenting`
+        );
       }
 
       room.activeMembers.delete(socket.id);
@@ -155,6 +318,12 @@ function setupSocket(server) {
       socket.leave(roomId);
 
       io.to(roomId).emit("participant-left", { socketId: socket.id });
+      emitActivity(
+        roomId,
+        "participant-left",
+        socket.id,
+        `${getParticipantName(leavingDetails)} left`
+      );
       console.log(`[Socket] User ${socket.id} left active room ${roomId}`);
 
       // 3. Host leaves; host authority returns only when the meeting creator rejoins.
@@ -165,6 +334,7 @@ function setupSocket(server) {
 
     // 4. Delete room if completely empty
     if (room.activeMembers.size === 0 && room.pendingMembers.size === 0) {
+      clearRoomTimers(room);
       rooms.delete(roomId);
       console.log(`[Socket] Room ${roomId} completely deleted`);
     }
@@ -278,9 +448,17 @@ function setupSocket(server) {
 
     const details = room.details.get(socketId);
     if (details?.isScreenSharing) {
+      room.activeScreenSharerId =
+        room.activeScreenSharerId === socketId ? null : room.activeScreenSharerId;
       io.to(roomId).emit("screen-share-stopped", {
         senderId: socketId,
       });
+      emitActivity(
+        roomId,
+        "screen-share-stopped",
+        socketId,
+        `${getParticipantName(details)} stopped presenting`
+      );
     }
 
     room.activeMembers.delete(socketId);
@@ -303,6 +481,7 @@ function setupSocket(server) {
     }
 
     const details = room.details.get(socketId);
+    clearPendingTimer(room, socketId);
     room.pendingMembers.delete(socketId);
     room.details.delete(socketId);
     if (room.hostId) {
@@ -329,9 +508,17 @@ function setupSocket(server) {
     }
 
     if (details?.isScreenSharing) {
+      room.activeScreenSharerId =
+        room.activeScreenSharerId === socketToRemove.id ? null : room.activeScreenSharerId;
       socketToRemove.broadcast.to(roomId).emit("screen-share-stopped", {
         senderId: socketToRemove.id,
       });
+      emitActivity(
+        roomId,
+        "screen-share-stopped",
+        socketToRemove.id,
+        `${getParticipantName(details)} stopped presenting`
+      );
     }
 
     room.activeMembers.delete(socketToRemove.id);
@@ -375,9 +562,11 @@ function setupSocket(server) {
 
       if (!rooms.has(roomId)) {
         rooms.set(roomId, createRoomState());
+        scheduleMeetingDurationLimit(roomId);
       }
 
       const room = rooms.get(roomId);
+      scheduleMeetingDurationLimit(roomId);
 
       const meeting = await prisma.meeting.findUnique({
         where: { meetingCode: roomId },
@@ -481,8 +670,8 @@ function setupSocket(server) {
         removeDisconnectedPendingSession(existingPendingClientSocketId, roomId);
       }
 
-      // Limit room size to 10 participants
-      if (room.activeMembers.size >= 10) {
+      // Limit room size to 15 participants
+      if (room.activeMembers.size >= 15) {
         socket.emit("join-denied", { reason: "Meeting is full" });
         return;
       }
@@ -528,6 +717,12 @@ function setupSocket(server) {
           });
         } else {
           socket.broadcast.to(roomId).emit("participant-joined", memberDetail);
+          emitActivity(
+            roomId,
+            "participant-joined",
+            socket.id,
+            `${getParticipantName(memberDetail)} joined`
+          );
         }
         void persistApprovedParticipant(roomId, socket.id);
         if (isMeetingCreator) {
@@ -545,6 +740,7 @@ function setupSocket(server) {
       } else {
         // Waiting room flow for every non-host participant.
         room.pendingMembers.add(socket.id);
+        scheduleWaitingLobbyTimeout(roomId, socket.id);
         socket.emit("waiting-room", { roomId });
 
         console.log(`[Socket] Join request from ${socket.id} in room ${roomId}`);
@@ -681,6 +877,7 @@ function setupSocket(server) {
 
       if (room.pendingMembers.has(socketId)) {
         room.pendingMembers.delete(socketId);
+        clearPendingTimer(room, socketId);
         room.activeMembers.add(socketId);
 
         const details = room.details.get(socketId);
@@ -717,6 +914,12 @@ function setupSocket(server) {
 
         // Notify active members in room
         io.to(roomId).emit("participant-joined", details);
+        emitActivity(
+          roomId,
+          "participant-joined",
+          socketId,
+          `${getParticipantName(details)} joined`
+        );
         console.log(`[Socket] Host ${socket.id} approved ${socketId} in room ${roomId}`);
         void persistApprovedParticipant(roomId, socketId);
       }
@@ -729,6 +932,7 @@ function setupSocket(server) {
 
       if (room.pendingMembers.has(socketId)) {
         room.pendingMembers.delete(socketId);
+        clearPendingTimer(room, socketId);
         room.details.delete(socketId);
 
         io.to(socketId).emit("join-denied", {
@@ -751,6 +955,17 @@ function setupSocket(server) {
         if (details?.clientId) {
           room.admittedClientIds.delete(details.clientId);
         }
+        if (details?.isScreenSharing) {
+          room.activeScreenSharerId =
+            room.activeScreenSharerId === socketId ? null : room.activeScreenSharerId;
+          io.to(roomId).emit("screen-share-stopped", { senderId: socketId });
+          emitActivity(
+            roomId,
+            "screen-share-stopped",
+            socketId,
+            `${getParticipantName(details)} stopped presenting`
+          );
+        }
         room.activeMembers.delete(socketId);
         room.details.delete(socketId);
 
@@ -761,58 +976,23 @@ function setupSocket(server) {
 
         io.to(socketId).emit("removed-from-meeting");
         io.to(roomId).emit("participant-left", { socketId });
+        emitActivity(
+          roomId,
+          "participant-removed",
+          socketId,
+          `${getParticipantName(details)} was removed`
+        );
         console.log(`[Socket] Host ${socket.id} removed ${socketId} in room ${roomId}`);
       }
     });
 
     // Hand raise updates
-    socket.on("raise-hand", ({ roomId, isHandRaised }) => {
-      const room = rooms.get(roomId);
-      if (!room || !room.details.has(socket.id)) return;
-
-      const details = room.details.get(socket.id);
-      details.isHandRaised = Boolean(isHandRaised);
-
-      socket.broadcast.to(roomId).emit("raise-hand-changed", {
-        senderId: socket.id,
-        isHandRaised: details.isHandRaised,
-      });
-    });
-
     // Host ends meeting for all participants
     socket.on("end-meeting-for-all", ({ roomId }) => {
       const room = rooms.get(roomId);
       if (!room || room.hostId !== socket.id) return;
 
-      io.to(roomId).emit("meeting-ended", {
-        reason: "Host ended the meeting",
-      });
-
-      for (const memberId of [...room.activeMembers]) {
-        const memberSocket = io.sockets.sockets.get(memberId);
-        if (memberSocket) {
-          memberSocket.leave(roomId);
-          memberSocket.meetingRoomId = null;
-        }
-      }
-
-      for (const memberId of [...room.pendingMembers]) {
-        const memberSocket = io.sockets.sockets.get(memberId);
-        if (memberSocket) {
-          memberSocket.emit("meeting-ended", {
-            reason: "Host ended the meeting",
-          });
-          memberSocket.leave(roomId);
-          memberSocket.meetingRoomId = null;
-        }
-      }
-
-      for (const timer of room.disconnectTimers.values()) {
-        clearTimeout(timer);
-      }
-
-      endedMeetings.add(roomId);
-      rooms.delete(roomId);
+      endMeetingForRoom(roomId, "Host ended the meeting");
       console.log(`[Socket] Host ${socket.id} ended meeting for all in room ${roomId}`);
     });
 
@@ -966,20 +1146,63 @@ function setupSocket(server) {
       const room = rooms.get(roomId);
       if (!room || !room.details.has(socket.id)) return;
 
-      room.details.get(socket.id).isScreenSharing = true;
-      socket.broadcast.to(roomId).emit("screen-share-started", {
+      const details = room.details.get(socket.id);
+      const previousPresenterId =
+        room.activeScreenSharerId && room.activeScreenSharerId !== socket.id
+          ? room.activeScreenSharerId
+          : null;
+
+      if (previousPresenterId) {
+        const previousDetails = room.details.get(previousPresenterId);
+        if (previousDetails) {
+          previousDetails.isScreenSharing = false;
+        }
+        io.to(previousPresenterId).emit("screen-share-force-stopped", {
+          reason: "Your presentation was stopped because another participant started presenting.",
+          newPresenterId: socket.id,
+        });
+        io.to(roomId).emit("screen-share-stopped", {
+          senderId: previousPresenterId,
+        });
+        emitActivity(
+          roomId,
+          "screen-share-stopped",
+          previousPresenterId,
+          `${getParticipantName(previousDetails)} stopped presenting`
+        );
+      }
+
+      details.isScreenSharing = true;
+      room.activeScreenSharerId = socket.id;
+      io.to(roomId).emit("screen-share-started", {
         senderId: socket.id,
       });
+      emitActivity(
+        roomId,
+        "screen-share-started",
+        socket.id,
+        `${getParticipantName(details)} started presenting`
+      );
     });
 
     socket.on("screen-share-stopped", ({ roomId }) => {
       const room = rooms.get(roomId);
       if (!room || !room.details.has(socket.id)) return;
 
-      room.details.get(socket.id).isScreenSharing = false;
-      socket.broadcast.to(roomId).emit("screen-share-stopped", {
+      const details = room.details.get(socket.id);
+      details.isScreenSharing = false;
+      if (room.activeScreenSharerId === socket.id) {
+        room.activeScreenSharerId = null;
+      }
+      io.to(roomId).emit("screen-share-stopped", {
         senderId: socket.id,
       });
+      emitActivity(
+        roomId,
+        "screen-share-stopped",
+        socket.id,
+        `${getParticipantName(details)} stopped presenting`
+      );
     });
 
     socket.on("leave-room", ({ roomId }) => {
