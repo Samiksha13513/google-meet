@@ -9,9 +9,7 @@ const authMiddleware = (req, res, next) => {
       message: "No token provided"
     });
   }
-
   const token = authHeader.split(" ")[1];
-
   try {
 
     const decoded = jwt.verify(
@@ -20,7 +18,6 @@ const authMiddleware = (req, res, next) => {
     );
 
     req.user = decoded;
-
     next();
 
   } catch (error) {
